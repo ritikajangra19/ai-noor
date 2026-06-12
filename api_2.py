@@ -5,8 +5,17 @@ from fastapi.responses import JSONResponse
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
 from av import VideoFrame
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------------------------------------------------
 # 1. Global Model Loader (Keep MuseTalk hot in GPU memory)
