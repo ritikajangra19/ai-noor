@@ -445,9 +445,7 @@ def initialize_models():
     print(vars(args))
 
     device = torch.device(
-        f"cuda:{args.gpu_id}"
-        if torch.cuda.is_available()
-        else "cpu"
+        "cuda" if torch.cuda.is_available() else "cpu"
     )
 
     vae, unet, pe = load_all_model(
