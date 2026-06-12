@@ -18,6 +18,7 @@ from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from musetalk.utils.blending import get_image_prepare_material, get_image_blending
 from musetalk.utils.utils import load_all_model
 from musetalk.utils.audio_processor import AudioProcessor
+from types import SimpleNamespace
 
 import shutil
 import threading
