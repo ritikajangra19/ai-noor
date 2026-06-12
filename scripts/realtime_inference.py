@@ -442,6 +442,8 @@ def initialize_models():
 
     args = parser.parse_args([])
 
+    print(vars(args))
+
     device = torch.device(
         f"cuda:{args.gpu_id}"
         if torch.cuda.is_available()
