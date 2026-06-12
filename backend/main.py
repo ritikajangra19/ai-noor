@@ -25,6 +25,11 @@ PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.append(PARENT_DIR)
 
+# Force the working directory to be the parent directory (ai-noor root)
+# so that all relative paths in musetalk and scripts resolve correctly.
+os.chdir(PARENT_DIR)
+print(f"[Backend] Forced working directory to: {os.getcwd()}")
+
 from musetalk.utils.utils import load_all_model
 from musetalk.utils.audio_processor import AudioProcessor
 from musetalk.utils.face_parsing import FaceParsing
