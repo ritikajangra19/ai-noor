@@ -27,6 +27,16 @@ import subprocess
 
 STREAM_QUEUE = queue.Queue(maxsize=500)
 
+vae = None
+unet = None
+pe = None
+whisper = None
+audio_processor = None
+fp = None
+device = None
+timesteps = None
+args = None
+
 
 def fast_check_ffmpeg():
     try:
@@ -410,3 +420,91 @@ if __name__ == "__main__":
                            audio_num,
                            args.fps,
                            args.skip_save_images)
+
+def initialize_models():
+
+    global vae
+    global unet
+    global pe
+    global whisper
+    global audio_processor
+    global fp
+    global device
+    global timesteps
+    global args
+
+    print("[INIT] Loading MuseTalk models...")
+
+    parser = argparse.ArgumentParser()
+
+    # SAME parser arguments here
+    # copy from __main__
+
+    args = parser.parse_args([])
+
+    device = torch.device(
+        f"cuda:{args.gpu_id}"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    vae, unet, pe = load_all_model(
+        unet_model_path=args.unet_model_path,
+        vae_type=args.vae_type,
+        unet_config=args.unet_config,
+        device=device
+    )
+
+    timesteps = torch.tensor(
+        [0],
+        device=device
+    )
+
+    pe = pe.half().to(device)
+
+    vae.vae = vae.vae.half().to(device)
+
+    unet.model = unet.model.half().to(device)
+
+    audio_processor = AudioProcessor(
+        feature_extractor_path=args.whisper_dir
+    )
+
+    whisper = WhisperModel.from_pretrained(
+        args.whisper_dir
+    )
+
+    whisper = whisper.to(
+        device=device,
+        dtype=unet.model.dtype
+    ).eval()
+
+    fp = FaceParsing()
+
+    print("[INIT] Models loaded")
+
+def create_avatar():
+
+    global args
+
+    inference_config = OmegaConf.load(
+        args.inference_config
+    )
+
+    avatar_id = list(
+        inference_config.keys()
+    )[0]
+
+    avatar_cfg = inference_config[
+        avatar_id
+    ]
+
+    avatar = Avatar(
+        avatar_id=avatar_id,
+        video_path=avatar_cfg["video_path"],
+        bbox_shift=0,
+        batch_size=args.batch_size,
+        preparation=False
+    )
+
+    return avatar                          

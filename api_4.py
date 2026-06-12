@@ -19,7 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from scripts.realtime_inference import (
     Avatar,
-    STREAM_QUEUE
+    STREAM_QUEUE,
+    initialize_models,
+    create_avatar
 )
 
 # ==================================================
@@ -271,3 +273,16 @@ def health():
     return {
         "status": "ok"
     }
+
+@app.on_event("startup")
+async def startup():
+
+    initialize_models()
+
+    global AVATAR
+
+    AVATAR = create_avatar()
+
+    print(
+        "[STARTUP] Avatar ready"
+    )
