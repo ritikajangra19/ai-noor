@@ -277,12 +277,20 @@ def health():
 @app.on_event("startup")
 async def startup():
 
+    logger.info(
+        "[STARTUP] backend started"
+    )
+
     initialize_models()
 
     global AVATAR
 
     AVATAR = create_avatar()
 
-    print(
-        "[STARTUP] Avatar ready"
+    logger.info(
+        "[STARTUP] avatar ready"
+    )
+
+    asyncio.create_task(
+        stream_loop()
     )

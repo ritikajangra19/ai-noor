@@ -421,6 +421,8 @@ if __name__ == "__main__":
                            args.fps,
                            args.skip_save_images)
 
+
+
 def initialize_models():
 
     global vae
@@ -435,18 +437,38 @@ def initialize_models():
 
     print("[INIT] Loading MuseTalk models...")
 
-    parser = argparse.ArgumentParser()
-
-    # SAME parser arguments here
-    # copy from __main__
-
-    args = parser.parse_args([])
-
-    print(vars(args))
+    args = SimpleNamespace(
+        version="v15",
+        ffmpeg_path="./ffmpeg-4.4-amd64-static/",
+        gpu_id=0,
+        vae_type="sd-vae",
+        unet_config="./models/musetalkV15/musetalk.json",
+        unet_model_path="./models/musetalkV15/unet.pth",
+        whisper_dir="./models/whisper",
+        inference_config="configs/inference/realtime.yaml",
+        bbox_shift=0,
+        result_dir="./results",
+        extra_margin=10,
+        fps=25,
+        audio_padding_length_left=2,
+        audio_padding_length_right=2,
+        batch_size=20,
+        output_vid_name=None,
+        use_saved_coord=False,
+        saved_coord=False,
+        parsing_mode="jaw",
+        left_cheek_width=90,
+        right_cheek_width=90,
+        skip_save_images=True
+    )
 
     device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
+        f"cuda:{args.gpu_id}"
+        if torch.cuda.is_available()
+        else "cpu"
     )
+
+    print(f"[INIT] Device: {device}")
 
     vae, unet, pe = load_all_model(
         unet_model_path=args.unet_model_path,
@@ -461,14 +483,14 @@ def initialize_models():
     )
 
     pe = pe.half().to(device)
-
     vae.vae = vae.vae.half().to(device)
-
     unet.model = unet.model.half().to(device)
 
     audio_processor = AudioProcessor(
         feature_extractor_path=args.whisper_dir
     )
+
+    weight_dtype = unet.model.dtype
 
     whisper = WhisperModel.from_pretrained(
         args.whisper_dir
@@ -476,12 +498,18 @@ def initialize_models():
 
     whisper = whisper.to(
         device=device,
-        dtype=unet.model.dtype
+        dtype=weight_dtype
     ).eval()
 
-    fp = FaceParsing()
+    whisper.requires_grad_(False)
 
-    print("[INIT] Models loaded")
+    fp = FaceParsing(
+        left_cheek_width=args.left_cheek_width,
+        right_cheek_width=args.right_cheek_width
+    )
+
+    print("[INIT] Models Loaded Successfully")
+
 
 def create_avatar():
 
@@ -507,4 +535,8 @@ def create_avatar():
         preparation=False
     )
 
-    return avatar                          
+    print(
+        f"[AVATAR] Loaded: {avatar_id}"
+    )
+
+    return avatar                         
