@@ -1,13 +1,17 @@
+import asyncio
 from aiortc import VideoStreamTrack
 from av import VideoFrame
 import cv2
 import os
+import numpy as np
 
 
 class AvatarTrack(VideoStreamTrack):
 
-    def __init__(self):
+    def __init__(self, frame_queue: asyncio.Queue = None):
         super().__init__()
+        self.frame_queue = frame_queue
+        self.last_frame = None
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
         video_path = os.path.join(current_dir, "avatar.mp4")
@@ -22,32 +26,36 @@ class AvatarTrack(VideoStreamTrack):
         )
 
     async def recv(self):
-
         pts, time_base = await self.next_timestamp()
 
-        ret, frame = self.cap.read()
-
-        print("FRAME READ:", ret)
-
-        if not ret:
-            print("RESTART VIDEO")
-
-            self.cap.set(
-                cv2.CAP_PROP_POS_FRAMES,
-                0
-            )
-
+        # If a frame queue is provided, try to pull frames from it in real-time
+        if self.frame_queue is not None:
+            try:
+                # 40ms timeout for 25 FPS stream consistency
+                frame = await asyncio.wait_for(self.frame_queue.get(), timeout=0.04)
+                self.last_frame = frame
+            except asyncio.TimeoutError:
+                # Fallback to the last successfully read frame if queue is temporarily starved
+                frame = self.last_frame
+        else:
+            # Standard looping behavior from file
             ret, frame = self.cap.read()
+            print("FRAME READ:", ret)
+            if not ret:
+                print("RESTART VIDEO")
+                self.cap.set(
+                    cv2.CAP_PROP_POS_FRAMES,
+                    0
+                )
+                ret, frame = self.cap.read()
+            self.last_frame = frame
 
         if frame is None:
-            raise Exception(
-                "Frame is None"
-            )
+            # Hard fallback: black frame
+            frame = np.zeros((256, 256, 3), dtype=np.uint8)
 
-        print(
-            "FRAME SHAPE:",
-            frame.shape
-        )
+        # Print debug shapes
+        # print("FRAME SHAPE:", frame.shape)
 
         video_frame = VideoFrame.from_ndarray(
             frame,
