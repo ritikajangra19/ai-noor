@@ -37,6 +37,7 @@ fp = None
 device = None
 timesteps = None
 args = None
+weight_dtype = None
 
 
 def fast_check_ffmpeg():
@@ -435,6 +436,7 @@ def initialize_models():
     global device
     global timesteps
     global args
+    global weight_dtype
 
     print("[INIT] Loading MuseTalk models...")
 
@@ -492,6 +494,10 @@ def initialize_models():
     )
 
     weight_dtype = unet.model.dtype
+
+    print(
+        f"[INIT] weight_dtype={weight_dtype}"
+    )
 
     whisper = WhisperModel.from_pretrained(
         args.whisper_dir
