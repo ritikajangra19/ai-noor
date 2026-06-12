@@ -25,8 +25,6 @@ import queue
 import time
 import subprocess
 
-STREAM_QUEUE = queue.Queue(maxsize=500)
-
 
 def fast_check_ffmpeg():
     try:
@@ -232,7 +230,6 @@ class Avatar:
             mask = self.mask_list_cycle[self.idx % (len(self.mask_list_cycle))]
             mask_crop_box = self.mask_coords_list_cycle[self.idx % (len(self.mask_coords_list_cycle))]
             combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
-            STREAM_QUEUE.put(combine_frame)
 
             if skip_save_images is False:
                 cv2.imwrite(f"{self.avatar_path}/tmp/{str(self.idx).zfill(8)}.png", combine_frame)
