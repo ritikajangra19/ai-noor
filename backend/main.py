@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,6 +19,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+pcs = set()
+
 @app.post("/offer")
 async def offer(data: dict):
 
@@ -25,6 +28,14 @@ async def offer(data: dict):
     print(data)
     print("=" * 50)
     pc = RTCPeerConnection()
+    pcs.add(pc)
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        print(f"Connection state is {pc.connectionState}")
+        if pc.connectionState in ["failed", "closed"]:
+            await pc.close()
+            pcs.discard(pc)
 
     await pc.setRemoteDescription(
         RTCSessionDescription(
@@ -43,3 +54,10 @@ async def offer(data: dict):
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type
     }
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros)
+    pcs.clear()
+

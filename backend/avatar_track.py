@@ -9,7 +9,8 @@ class AvatarTrack(VideoStreamTrack):
     def __init__(self):
         super().__init__()
 
-        video_path = os.path.abspath("avatar.mp4")
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        video_path = os.path.join(current_dir, "avatar.mp4")
 
         print("VIDEO PATH:", video_path)
 
