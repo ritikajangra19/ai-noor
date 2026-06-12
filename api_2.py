@@ -80,7 +80,7 @@ class MuseTalkTransformTrack(MediaStreamTrack):
             raise
 
 # -----------------------------------------------------------------
-# 3. WebRTC Offer Endpoint
+# 3. WebRTC Offer Endpoint (Fixed for SDP Transceiver Sync)
 # -----------------------------------------------------------------
 @app.post("/offer")
 async def offer(request: Request):
@@ -88,6 +88,11 @@ async def offer(request: Request):
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
     pc = RTCPeerConnection()
+
+    # CRITICAL FIX 1: Pre-create a video transceiver. 
+    # This explicitly tells aiortc that the server intends to SEND video back, 
+    # preventing the 'None is not in list' direction error during createAnswer.
+    video_transceiver = pc.addTransceiver("video", direction="sendonly")
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
@@ -99,13 +104,17 @@ async def offer(request: Request):
     def on_track(track):
         if track.kind == "audio":
             print("Received client audio track, routing to MuseTalk...")
+            
             # Create our video generator track fueled by the incoming audio track
             video_track = MuseTalkTransformTrack(relay.subscribe(track))
-            # Send the real-time generated lipsync video track back to the client
-            pc.addTrack(video_track)
+            
+            # CRITICAL FIX 2: Instead of pc.addTrack(), replace the track 
+            # inside our pre-allocated transceiver.
+            video_transceiver.sender.replaceTrack(video_track)
 
     # Set remote description (Client's setup)
     await pc.setRemoteDescription(offer)
+    
     # Generate answer description (Server's configuration)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
