@@ -24,6 +24,8 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.append(PARENT_DIR)
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
 
 # Force the working directory to be the parent directory (ai-noor root)
 # so that all relative paths in musetalk and scripts resolve correctly.
