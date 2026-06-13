@@ -1,6 +1,6 @@
 avator_1:
-  preparation: False # your can set it to False if you want to use the existing avator, it will save time
+  preparation: True # your can set it to False if you want to use the existing avator, it will save time
   bbox_shift: 5
-  video_path: "data/video/noor_sample.mp4"
+  video_path: "data/video/noor_stable_v2.mp4"
   audio_clips:
       audio_0: "data/audio/11lab-audio-noor.mp3"
