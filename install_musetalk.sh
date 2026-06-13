@@ -7,7 +7,7 @@ echo " MuseTalk Stable Installation"
 echo "========================================="
 
 echo "[watch] Step 1/10: Activating conda environment 'MuseTalk'..."
-conda activate MuseTalk
+# conda activate MuseTalk
 
 echo "[watch] Step 2/10: Installing PyTorch stack with pip..."
 pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
