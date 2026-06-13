@@ -11,11 +11,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 27, 45, 0.65);
+            --bg-color: #0d160e; /* Deep forest dark green */
+            --card-bg: rgba(21, 35, 23, 0.65); /* Dark foliage green card */
             --border-color: rgba(255, 255, 255, 0.08);
-            --primary-accent: #8b5cf6; /* Violet */
-            --secondary-accent: #06b6d4; /* Cyan */
+            --primary-accent: #10b981; /* Emerald Green */
+            --secondary-accent: #84cc16; /* Lime Green */
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --font-family: 'Outfit', sans-serif;
@@ -90,7 +90,7 @@
             font-size: 1.5rem;
             font-weight: 700;
             letter-spacing: -0.5px;
-            background: linear-gradient(to right, #ffffff, #a78bfa);
+            background: linear-gradient(to right, #ffffff, #a7f3d0);
             -webkit-background-clip: text;
             background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -174,11 +174,12 @@
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
         }
 
-        #avatarCanvas {
+        canvas {
             width: 100%;
             height: 100%;
             object-fit: cover;
-            display: block;
+            object-position: top center;
+            border-radius: 12px;
         }
 
         .avatar-overlay {
@@ -273,7 +274,7 @@
         }
 
         .message.user .message-bubble {
-            background: linear-gradient(135deg, var(--primary-accent), #7c3aed);
+            background: linear-gradient(135deg, var(--primary-accent), #047857);
             color: #ffffff;
             border-bottom-right-radius: 4px;
         }
@@ -375,7 +376,7 @@
 
         .input-wrapper:focus-within {
             border-color: var(--primary-accent);
-            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+            box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25);
         }
 
         .chat-input {
@@ -405,7 +406,7 @@
             align-items: center;
             justify-content: center;
             transition: opacity 0.2s ease, transform 0.2s ease;
-            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
         }
 
         .send-btn:hover {
@@ -465,10 +466,10 @@
     <header>
         <div class="header-logo">
             <div class="logo-dot"></div>
-            <h1>Noor Live WebSocket Avatar</h1>
+            <h1>Noor - The Zoo Guide</h1>
         </div>
         <div style="display: flex; align-items: center; gap: 1rem;">
-            <div class="status-badge">
+            <div class="status-badge" style="display: none;">
                 <span style="font-size: 0.8rem; color: var(--text-muted); margin-right: 0.25rem;">Server:</span>
                 <input type="text" id="serverUrlInput" placeholder="Current Host" onchange="reinitialize()" style="background: transparent; border: none; color: white; font-family: inherit; font-size: 0.85rem; outline: none; width: 220px;">
             </div>
@@ -505,15 +506,6 @@
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
-            </div>
-
-            <!-- Preset / Demo Controls -->
-            <div class="preset-prompts">
-                <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); margin-bottom: 0.3rem;">DEMO MODES:</div>
-                <div class="preset-row">
-                    <button class="btn-preset primary" onclick="playElevenLabsAudio()">🎵 ElevenLabs Audio (Pre-saved)</button>
-                    <button class="btn-preset primary" onclick="playHardcodedTTS()">🗣️ Generate 30s Speech (Edge-TTS)</button>
-                </div>
             </div>
 
             <!-- Custom input area -->
@@ -554,9 +546,13 @@
         const ctx = canvas.getContext("2d");
 
         let ws = null;
-        let frameBuffer = [];
-        let totalFramesCount = 0;
-        let activeAudio = null;
+        let playbackQueue = [];
+        let currentPlayingChunk = null;
+        let animationFrameId = null;
+        let currentSessionId = "";
+        
+        // Single global audio element to bypass browser autoplay restrictions
+        const globalAudioPlayer = new Audio();
         
         let idleFrames = [];
         let idleFrameIdx = 0;
@@ -631,11 +627,6 @@
                 onlineDot.className = "status-dot glowing";
                 statusText.innerText = "Noor is thinking...";
                 avatarOverlayText.innerText = "Noor (Thinking...)";
-            } else if (state === "buffering") {
-                onlineDot.style.backgroundColor = "#8b5cf6"; // violet
-                onlineDot.className = "status-dot glowing";
-                statusText.innerText = "Buffering Stream...";
-                avatarOverlayText.innerText = "Noor (Buffering)";
             } else if (state === "speaking") {
                 onlineDot.style.backgroundColor = "#a855f7"; // purple glowing
                 onlineDot.className = "status-dot glowing";
@@ -695,39 +686,72 @@
 
             ws.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
+                
+                // Ignore messages from old sessions if a new request was made
+                if (msg.session_id && msg.session_id !== currentSessionId) {
+                    return;
+                }
 
-                if (msg.type === "start") {
-                    console.log("Received start signal. Total frames:", msg.total_frames);
-                    totalFramesCount = msg.total_frames;
-                    frameBuffer = new Array(totalFramesCount);
+                if (msg.type === "chunk_start") {
+                    console.log(`Received chunk_start for index: ${msg.chunk_index}. Total frames: ${msg.total_frames}`);
+                    
+                    if (msg.chunk_index === 0) {
+                        // Keep typingIndicator visible and status as 'thinking'
+                        playbackQueue = [];
+                        globalAudioPlayer.pause();
+                        currentPlayingChunk = null;
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                    }
+
+                    const chunk = {
+                        index: msg.chunk_index,
+                        text: msg.text,
+                        audioSrc: msg.audio,
+                        frames: new Array(msg.total_frames),
+                        totalFrames: msg.total_frames,
+                        isReady: false,
+                        receivedFrames: 0
+                    };
+                    playbackQueue.push(chunk);
                     
                     addMessage("noor", msg.text);
-                    typingIndicator.style.display = "none";
-                    updateStatus("buffering");
+                    checkQueue();
 
-                    if (activeAudio) {
-                        activeAudio.pause();
-                    }
-                    activeAudio = new Audio(msg.audio);
-                    activeAudio.preload = "auto";
-                    
                 } else if (msg.type === "frame") {
-                    // Load frame image into buffer
-                    const img = new Image();
-                    img.onload = () => {
-                        frameBuffer[msg.index] = img;
-                        // Render first frame immediately to lock pose
-                        if (msg.index === 0 && currentStatusState === "buffering") {
-                            if (img.complete && img.naturalWidth !== 0) {
-                                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    // Find target chunk in queue
+                    let targetChunk = currentPlayingChunk && currentPlayingChunk.index === msg.chunk_index 
+                                      ? currentPlayingChunk 
+                                      : playbackQueue.find(c => c.index === msg.chunk_index);
+
+                    if (targetChunk) {
+                        const img = new Image();
+                        img.onload = () => {
+                            targetChunk.frames[msg.index] = img;
+                            targetChunk.receivedFrames++;
+                            
+                            // Render first frame immediately to lock pose
+                            if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
+                                if (img.complete && img.naturalWidth !== 0) {
+                                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                }
                             }
-                        }
-                    };
-                    img.src = msg.image;
+                            checkQueue();
+                        };
+                        img.src = msg.image;
+                    }
+
+                } else if (msg.type === "chunk_end") {
+                    let targetChunk = currentPlayingChunk && currentPlayingChunk.index === msg.chunk_index 
+                                      ? currentPlayingChunk 
+                                      : playbackQueue.find(c => c.index === msg.chunk_index);
+                    if (targetChunk) {
+                        targetChunk.isReady = true;
+                        console.log(`Chunk ${msg.chunk_index} fully ready.`);
+                        checkQueue();
+                    }
 
                 } else if (msg.type === "end") {
-                    console.log("All frames loaded. Playing response...");
-                    playSync();
+                    console.log("All chunks sent from server.");
                 } else if (msg.type === "error") {
                     console.error("Server error:", msg.message);
                     addMessage("system", "Error: " + msg.message);
@@ -737,61 +761,138 @@
             };
         }
 
-        // Sync player using requestAnimationFrame
-        function playSync() {
-            if (!activeAudio) return;
+        function checkQueue() {
+            if (currentPlayingChunk !== null) return; // Currently playing a chunk
 
+            if (playbackQueue.length > 0) {
+                const nextChunk = playbackQueue[0];
+                
+                // Start playing if the chunk is ready, or we have accumulated 40 frames (~1.6s buffer)
+                if (nextChunk.isReady || nextChunk.receivedFrames >= 40) {
+                    currentPlayingChunk = playbackQueue.shift(); // Remove from queue
+                    
+                    // Hide the typing indicator as soon as the first chunk starts playing
+                    if (nextChunk.index === 0) {
+                        typingIndicator.style.display = "none";
+                    }
+                    
+                    playChunk(currentPlayingChunk);
+                }
+            }
+        }
+
+        function playChunk(chunk) {
             updateStatus("speaking");
-            activeAudio.play().then(() => {
-                renderLoop();
+            
+            globalAudioPlayer.src = chunk.audioSrc;
+            
+            globalAudioPlayer.onended = () => {
+                currentPlayingChunk = null;
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                
+                // If there are more chunks, checkQueue will start them
+                if (playbackQueue.length > 0) {
+                    checkQueue();
+                } else {
+                    updateStatus("idle");
+                }
+            };
+
+            globalAudioPlayer.play().then(() => {
+                renderChunkLoop(chunk);
             }).catch(err => {
                 console.error("Audio play error:", err);
-                updateStatus("idle");
+                currentPlayingChunk = null;
+                checkQueue(); // Try next chunk if this one fails
             });
         }
 
-        function renderLoop() {
-            if (!activeAudio || activeAudio.paused || activeAudio.ended) {
-                updateStatus("idle");
+        function renderChunkLoop(chunk) {
+            if (chunk !== currentPlayingChunk || globalAudioPlayer.ended) {
                 return;
             }
 
-            const currentTime = activeAudio.currentTime;
+            const currentTime = globalAudioPlayer.currentTime;
             const frameIndex = Math.floor(currentTime * 25);
 
-            if (frameIndex < totalFramesCount && frameBuffer[frameIndex]) {
-                const img = frameBuffer[frameIndex];
-                if (img.complete && img.naturalWidth !== 0) {
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            if (frameIndex < chunk.totalFrames) {
+                const hasFrame = !!chunk.frames[frameIndex];
+                
+                if (chunk.isBuffering) {
+                    // Only resume if we have a healthy cushion (20 frames) or the chunk is complete
+                    const bufferCushion = chunk.receivedFrames - frameIndex;
+                    const isHealthy = bufferCushion >= 20 || chunk.isReady;
+                    
+                    if (hasFrame && isHealthy) {
+                        chunk.isBuffering = false;
+                        updateStatus("speaking");
+                        globalAudioPlayer.play().catch(e => {});
+                    }
+                }
+
+                if (hasFrame && !chunk.isBuffering) {
+                    const img = chunk.frames[frameIndex];
+                    if (img.complete && img.naturalWidth !== 0) {
+                        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                        }
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    }
+                } else {
+                    // Frame is NOT available or we are still buffering! Pause and wait for cushion
+                    if (!chunk.isBuffering) {
+                        chunk.isBuffering = true;
+                        updateStatus("idle"); // Show breathing animation seamlessly
+                        globalAudioPlayer.pause();
+                    }
                 }
             }
 
-            requestAnimationFrame(renderLoop);
+            animationFrameId = requestAnimationFrame(() => renderChunkLoop(chunk));
         }
 
-        // Generate slow breathing idle loop from cached frames
+        // Generate smooth breathing idle loop from cached frames
         function startIdleLoop() {
             if (idleInterval) clearInterval(idleInterval);
             idleInterval = setInterval(() => {
-                if (currentStatusState !== "idle") return;
+                if (currentStatusState === "speaking") return;
                 if (idleFrames.length > 0) {
                     const img = idleFrames[idleFrameIdx % idleFrames.length];
                     if (img && img.complete && img.naturalWidth !== 0) {
+                        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                        }
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     }
                     idleFrameIdx++;
                 }
-            }, 120); // 8 FPS for a natural idle loop
+            }, 40); // 25 FPS for a perfectly smooth idle loop
         }
 
-        // Preload first 50 frames from the static asset directory
+        // Preload frames from 5th second (125) to 15th second (375)
         function loadIdleFrames() {
             idleFrames = [];
-            const IDLE_FRAME_COUNT = 60;
-            for (let i = 0; i < IDLE_FRAME_COUNT; i++) {
+            const START_FRAME = 125; // 5th second (5 * 25 FPS)
+            const END_FRAME = 375;   // 15th second (15 * 25 FPS)
+            for (let i = START_FRAME; i < END_FRAME; i++) {
                 const img = new Image();
                 const frameNum = String(i).padStart(8, '0');
                 img.src = getServerUrl(`/full_imgs/${frameNum}.png`);
+                
+                // Draw the very first frame immediately once it loads so the screen isn't blank
+                if (i === START_FRAME) {
+                    img.onload = () => {
+                        if (currentStatusState === "idle") {
+                            if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+                                canvas.width = img.naturalWidth;
+                                canvas.height = img.naturalHeight;
+                            }
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        }
+                    };
+                }
                 idleFrames.push(img);
             }
         }
@@ -804,25 +905,6 @@
             connectWS();
         }
 
-        // Send ElevenLabs Preset
-        function playElevenLabsAudio() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                typingIndicator.style.display = "flex";
-                updateStatus("thinking");
-                ws.send(JSON.stringify({ text: "elevenlabs", elevenlabs: true }));
-            }
-        }
-
-        // Send Hardcoded TTS Preset
-        function playHardcodedTTS() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                typingIndicator.style.display = "flex";
-                updateStatus("thinking");
-                const hardcodedText = "Hello! I am Noor, your virtual zoo guide. Today, you will have the opportunity to discover a wonderful variety of animals from around the world, including majestic lions, gentle elephants, playful monkeys, colorful birds, and many more fascinating species. Feel free to ask me any questions throughout your visit. Let's begin our exciting journey into the amazing world of wildlife together.";
-                ws.send(JSON.stringify({ text: hardcodedText }));
-            }
-        }
-
         // Send Custom Input Chat
         function sendCustomChat(event) {
             event.preventDefault();
@@ -830,11 +912,23 @@
             if (!text) return;
 
             if (ws && ws.readyState === WebSocket.OPEN) {
+                currentSessionId = Date.now().toString();
+                
+                // Cancel current playback completely
+                globalAudioPlayer.pause();
+                currentPlayingChunk = null;
+                playbackQueue = [];
+                if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                
+                // Unlock audio on user interaction by playing silence
+                globalAudioPlayer.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA";
+                globalAudioPlayer.play().catch(e => {});
+                
                 addMessage("user", text);
                 messageInput.value = "";
                 typingIndicator.style.display = "flex";
                 updateStatus("thinking");
-                ws.send(JSON.stringify({ text: text }));
+                ws.send(JSON.stringify({ text: text, session_id: currentSessionId }));
             } else {
                 addMessage("noor", "Error: Server connection offline. Cannot send message.");
             }
