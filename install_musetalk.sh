@@ -1,6 +1,10 @@
 #!/bin/bash
 
-set -euo pipefail
+set -e
+
+echo "========================================="
+echo " MuseTalk Stable Installation"
+echo "========================================="
 
 echo "[watch] Step 1/10: Activating conda environment 'MuseTalk'..."
 conda activate MuseTalk
