@@ -36,19 +36,68 @@ from transformers import WhisperModel
 import re
 
 def split_into_sentences(text: str) -> list[str]:
-    """Splits a long paragraph into individual sentences, combining very short ones."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    """Splits a long paragraph into individual sentences.
+    If a sentence is extremely long (like a run-on text without punctuation),
+    it splits it by clauses (commas) or by words to prevent blocking the GPU for too long.
+    """
+    # 1. Split by sentence end markers
+    raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    
+    sub_chunks = []
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+            
+        # 2. If sentence is reasonably short, keep it intact
+        if len(s) <= 150:
+            sub_chunks.append(s)
+            continue
+            
+        # 3. Try splitting by clause boundaries (comma, semicolon, colon, dash)
+        clauses = re.split(r'(?<=[,;:—])\s+', s)
+        for clause in clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
+                
+            if len(clause) <= 150:
+                sub_chunks.append(clause)
+                continue
+                
+            # 4. Hard-split by word boundaries to enforce max chunk size of ~120 chars
+            words = clause.split()
+            current_chunk = []
+            current_len = 0
+            for w in words:
+                current_chunk.append(w)
+                current_len += len(w) + 1
+                if current_len >= 120:
+                    sub_chunks.append(" ".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+            if current_chunk:
+                sub_chunks.append(" ".join(current_chunk))
+
+    # 5. Group very short adjacent chunks together for smooth natural speech flow
     combined = []
     current = ""
-    for s in sentences:
-        s = s.strip()
-        if not s: continue
-        current = current + " " + s if current else s
-        if len(current) > 40:
-            combined.append(current)
-            current = ""
+    for chunk in sub_chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if current:
+            # Only combine if the combined length is not too large
+            if len(current) + len(chunk) + 1 <= 150:
+                current = current + " " + chunk
+            else:
+                combined.append(current)
+                current = chunk
+        else:
+            current = chunk
     if current:
         combined.append(current)
+        
     return combined
 
 app = FastAPI(title="Noor AI WebSocket Server")
