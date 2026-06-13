@@ -67,8 +67,8 @@ def osmakedirs(path_list):
         os.makedirs(path) if not os.path.exists(path) else None
 
 
-@torch.no_grad()
 class Avatar:
+    @torch.no_grad()
     def __init__(self, avatar_id, video_path, bbox_shift, batch_size, preparation):
         self.avatar_id = avatar_id
         self.video_path = video_path
@@ -159,6 +159,7 @@ class Avatar:
                 input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
                 self.mask_list_cycle = read_imgs(input_mask_list)
 
+    @torch.no_grad()
     def prepare_material(self):
         print("preparing data materials ... ...")
         with open(self.avatar_info_path, "w") as f:
@@ -223,6 +224,7 @@ class Avatar:
 
         torch.save(self.input_latent_list_cycle, os.path.join(self.latents_out_path))
 
+    @torch.no_grad()
     def process_frames(self, res_frame_queue, video_len, skip_save_images):
         print(video_len)
         while True:

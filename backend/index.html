@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Noor - Live WebSocket Streaming Avatar</title>
+    <link rel="icon" href="data:,">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 27, 45, 0.65);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --primary-accent: #8b5cf6; /* Violet */
+            --secondary-accent: #06b6d4; /* Cyan */
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --font-family: 'Outfit', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-family);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Abstract ambient background glows */
+        body::before, body::after {
+            content: '';
+            position: absolute;
+            width: 450px;
+            height: 450px;
+            border-radius: 50%;
+            filter: blur(150px);
+            z-index: -1;
+            opacity: 0.25;
+        }
+
+        body::before {
+            background: var(--primary-accent);
+            top: 10%;
+            left: 5%;
+        }
+
+        body::after {
+            background: var(--secondary-accent);
+            bottom: 15%;
+            right: 5%;
+        }
+
+        header {
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(11, 15, 25, 0.8);
+            backdrop-filter: blur(10px);
+        }
+
+        .header-logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-dot {
+            width: 12px;
+            height: 12px;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--primary-accent);
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(to right, #ffffff, #a78bfa);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(255, 255, 255, 0.04);
+            padding: 0.4rem 0.8rem;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #ef4444; /* disconnected red by default */
+        }
+
+        .status-dot.glowing {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 0.6; box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7); }
+            70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 8px rgba(139, 92, 246, 0); }
+            100% { transform: scale(0.9); opacity: 0.6; box-shadow: 0 0 0 0 rgba(139, 92, 246, 0); }
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 2rem;
+            padding: 2rem;
+            max-width: 1500px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        @media (max-width: 1024px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Glassmorphism panel styling */
+        .glass-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Avatar side style */
+        .avatar-container {
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            position: relative;
+        }
+
+        .avatar-box {
+            position: relative;
+            width: 100%;
+            max-width: 480px;
+            aspect-ratio: 1;
+            border-radius: 20px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: #080b12;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        #avatarCanvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .avatar-overlay {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(5px);
+            padding: 0.35rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .avatar-overlay .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--primary-accent);
+        }
+
+        /* Chat side style */
+        .chat-container {
+            height: 75vh;
+            min-height: 580px;
+        }
+
+        .chat-header {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .chat-header h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            background: rgba(255, 255, 255, 0.01);
+        }
+
+        .chat-messages::-webkit-scrollbar {
+            width: 6px;
+        }
+        .chat-messages::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+
+        .message {
+            max-width: 80%;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+        }
+
+        .message.noor {
+            align-self: flex-start;
+        }
+
+        .message-bubble {
+            padding: 0.9rem 1.25rem;
+            border-radius: 18px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .message.user .message-bubble {
+            background: linear-gradient(135deg, var(--primary-accent), #7c3aed);
+            color: #ffffff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.noor .message-bubble {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-bottom-left-radius: 4px;
+            white-space: pre-line;
+        }
+
+        .message-time {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            padding: 0 0.25rem;
+        }
+
+        .message.user .message-time {
+            align-self: flex-end;
+        }
+
+        .message.noor .message-time {
+            align-self: flex-start;
+        }
+
+        /* Preset buttons styling */
+        .preset-prompts {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            padding: 1rem 1.5rem;
+            border-top: 1px solid var(--border-color);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .preset-row {
+            display: flex;
+            gap: 0.75rem;
+            overflow-x: auto;
+        }
+        .preset-row::-webkit-scrollbar {
+            display: none;
+        }
+
+        .btn-preset {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            padding: 0.65rem 1.25rem;
+            border-radius: 14px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-main);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+            font-family: var(--font-family);
+        }
+
+        .btn-preset:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: var(--primary-accent);
+            transform: translateY(-1px);
+        }
+
+        .btn-preset.primary {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(6, 182, 212, 0.2));
+            border-color: rgba(139, 92, 246, 0.4);
+        }
+        .btn-preset.primary:hover {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(6, 182, 212, 0.3));
+            border-color: var(--primary-accent);
+        }
+
+        /* Chat Input Area */
+        .chat-input-area {
+            padding: 1.25rem 1.5rem;
+            border-top: 1px solid var(--border-color);
+            background: rgba(11, 15, 25, 0.4);
+        }
+
+        .chat-form {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            padding: 0.2rem 0.5rem;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: var(--primary-accent);
+            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+        }
+
+        .chat-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-main);
+            font-family: var(--font-family);
+            font-size: 0.95rem;
+            padding: 0.75rem 0.5rem;
+            outline: none;
+        }
+
+        .chat-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            color: #ffffff;
+            border: none;
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+        }
+
+        .send-btn:hover {
+            transform: scale(1.03);
+            opacity: 0.95;
+        }
+
+        .send-btn:active {
+            transform: scale(0.97);
+        }
+
+        .send-btn svg {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+            transform: rotate(-45deg) translate(2px, -2px);
+        }
+
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0.5rem 1rem;
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            width: max-content;
+            margin-left: 1.5rem;
+            margin-bottom: 0.5rem;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--text-muted);
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-logo">
+            <div class="logo-dot"></div>
+            <h1>Noor Live WebSocket Avatar</h1>
+        </div>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+            <div class="status-badge">
+                <span style="font-size: 0.8rem; color: var(--text-muted); margin-right: 0.25rem;">Server:</span>
+                <input type="text" id="serverUrlInput" placeholder="Current Host" onchange="reinitialize()" style="background: transparent; border: none; color: white; font-family: inherit; font-size: 0.85rem; outline: none; width: 220px;">
+            </div>
+            <div class="status-badge">
+                <div class="status-dot" id="onlineDot"></div>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <div id="httpsWarning" style="display: none; background: #ef4444; color: white; padding: 0.5rem 1rem; text-align: center; font-size: 0.85rem; font-weight: bold; border-bottom: 1px solid rgba(0,0,0,0.1); z-index: 1000; position: relative;">
+        ⚠️ Mixed Content Blocked: You loaded this page over HTTPS (Cloudflare), but you set an insecure HTTP/WS Server IP. Please clear the "Server" field in the header to connect securely through your tunnel!
+    </div>
+
+    <main>
+        <!-- Left Column: Chat log -->
+        <section class="glass-panel chat-container">
+            <div class="chat-header">
+                <h2>Noor Chatbot</h2>
+            </div>
+            
+            <div class="chat-messages" id="chatMessages">
+                <!-- Initial Greeting -->
+                <div class="message noor">
+                    <div class="message-bubble">
+                        Welcome to Noor Live Streaming Interface! Click one of the options below to generate audio and stream lipsynced video in real-time.
+                    </div>
+                    <span class="message-time">System</span>
+                </div>
+            </div>
+
+            <!-- Chat Loader indicator -->
+            <div class="typing-indicator" id="typingIndicator" style="display: none;">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+            </div>
+
+            <!-- Preset / Demo Controls -->
+            <div class="preset-prompts">
+                <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); margin-bottom: 0.3rem;">DEMO MODES:</div>
+                <div class="preset-row">
+                    <button class="btn-preset primary" onclick="playElevenLabsAudio()">🎵 ElevenLabs Audio (Pre-saved)</button>
+                    <button class="btn-preset primary" onclick="playHardcodedTTS()">🗣️ Generate 30s Speech (Edge-TTS)</button>
+                </div>
+            </div>
+
+            <!-- Custom input area -->
+            <div class="chat-input-area">
+                <form class="chat-form" id="chatForm" onsubmit="sendCustomChat(event)">
+                    <div class="input-wrapper">
+                        <input type="text" class="chat-input" id="messageInput" placeholder="Type custom message to generate speech and stream..." autocomplete="off">
+                    </div>
+                    <button type="submit" class="send-btn" id="sendBtn">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M2 21l21-9L2 3v7l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </form>
+            </div>
+        </section>
+
+        <!-- Right Column: Avatar WebRTC Display -->
+        <section class="glass-panel avatar-container">
+            <div class="avatar-box">
+                <canvas id="avatarCanvas" width="256" height="256"></canvas>
+                <div class="avatar-overlay">
+                    <div class="dot"></div>
+                    <span id="avatarOverlayText">Noor (Idle)</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const chatMessages = document.getElementById("chatMessages");
+        const messageInput = document.getElementById("messageInput");
+        const typingIndicator = document.getElementById("typingIndicator");
+        const onlineDot = document.getElementById("onlineDot");
+        const statusText = document.getElementById("statusText");
+        const avatarOverlayText = document.getElementById("avatarOverlayText");
+        const canvas = document.getElementById("avatarCanvas");
+        const ctx = canvas.getContext("2d");
+
+        let ws = null;
+        let frameBuffer = [];
+        let totalFramesCount = 0;
+        let activeAudio = null;
+        
+        let idleFrames = [];
+        let idleFrameIdx = 0;
+        let idleInterval = null;
+        let currentStatusState = "idle";
+
+        // Helper helper because python uses json.dumps and JS uses JSON.stringify
+        const json = {
+            dumps: JSON.stringify,
+            loads: JSON.parse
+        };
+
+        // Determine base HTTP & WS URLs
+        function getServerUrl(path) {
+            let customUrl = document.getElementById("serverUrlInput").value.trim();
+            if (customUrl) {
+                if (customUrl.startsWith(':')) {
+                    customUrl = window.location.protocol + "//" + window.location.hostname + customUrl;
+                } else if (!customUrl.startsWith('http://') && !customUrl.startsWith('https://')) {
+                    customUrl = window.location.protocol + "//" + customUrl;
+                }
+                const base = customUrl.endsWith('/') ? customUrl.slice(0, -1) : customUrl;
+                return `${base}${path}`;
+            }
+            return path;
+        }
+
+        function getWebSocketUrl() {
+            let customUrl = document.getElementById("serverUrlInput").value.trim();
+            if (customUrl) {
+                if (customUrl.startsWith(':')) {
+                    const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+                    customUrl = wsProtocol + window.location.hostname + customUrl;
+                } else {
+                    customUrl = customUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+                    if (!customUrl.startsWith('ws://') && !customUrl.startsWith('wss://')) {
+                        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+                        customUrl = wsProtocol + customUrl;
+                    }
+                }
+                const base = customUrl.endsWith('/') ? customUrl.slice(0, -1) : customUrl;
+                return `${base}/chat`;
+            }
+            const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+            return `${protocol}${window.location.host}/chat`;
+        }
+
+        function showHttpsWarningIfNeeded() {
+            const warningEl = document.getElementById("httpsWarning");
+            if (!warningEl) return;
+            if (window.location.protocol === "https:") {
+                const wsUrl = getWebSocketUrl();
+                const customUrl = document.getElementById("serverUrlInput").value.trim();
+                if (customUrl && wsUrl.startsWith("ws://")) {
+                    warningEl.style.display = "block";
+                    return;
+                }
+            }
+            warningEl.style.display = "none";
+        }
+
+        // Update status indicators
+        function updateStatus(state) {
+            currentStatusState = state;
+            if (state === "idle") {
+                onlineDot.style.backgroundColor = "#10b981"; // green
+                onlineDot.className = "status-dot";
+                statusText.innerText = "Connected";
+                avatarOverlayText.innerText = "Noor (Idle)";
+            } else if (state === "thinking") {
+                onlineDot.style.backgroundColor = "#06b6d4"; // cyan
+                onlineDot.className = "status-dot glowing";
+                statusText.innerText = "Noor is thinking...";
+                avatarOverlayText.innerText = "Noor (Thinking...)";
+            } else if (state === "buffering") {
+                onlineDot.style.backgroundColor = "#8b5cf6"; // violet
+                onlineDot.className = "status-dot glowing";
+                statusText.innerText = "Buffering Stream...";
+                avatarOverlayText.innerText = "Noor (Buffering)";
+            } else if (state === "speaking") {
+                onlineDot.style.backgroundColor = "#a855f7"; // purple glowing
+                onlineDot.className = "status-dot glowing";
+                statusText.innerText = "Noor is Speaking";
+                avatarOverlayText.innerText = "Noor (Speaking)";
+            }
+        }
+
+        // Add message bubble to chat logs
+        function addMessage(sender, text) {
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const messageDiv = document.createElement("div");
+            messageDiv.className = `message ${sender}`;
+
+            messageDiv.innerHTML = `
+                <div class="message-bubble">${text}</div>
+                <span class="message-time">${time}</span>
+            `;
+
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // Connect to WebSocket Server
+        function connectWS() {
+            if (ws) {
+                try { ws.close(); } catch(e) {}
+            }
+
+            showHttpsWarningIfNeeded();
+            const wsUrl = getWebSocketUrl();
+            console.log("Connecting to WebSocket:", wsUrl);
+            try {
+                ws = new WebSocket(wsUrl);
+            } catch(e) {
+                console.error("Failed to construct WebSocket:", e);
+                return;
+            }
+
+            ws.onopen = () => {
+                updateStatus("idle");
+                console.log("WebSocket connected successfully.");
+            };
+
+            ws.onclose = () => {
+                onlineDot.style.backgroundColor = "#ef4444"; // red
+                onlineDot.className = "status-dot glowing";
+                statusText.innerText = "Disconnected (Retrying)";
+                avatarOverlayText.innerText = "Noor (Offline)";
+                console.log("WebSocket disconnected. Retrying in 3 seconds...");
+                setTimeout(connectWS, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error("WebSocket connection error:", err);
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "start") {
+                    console.log("Received start signal. Total frames:", msg.total_frames);
+                    totalFramesCount = msg.total_frames;
+                    frameBuffer = new Array(totalFramesCount);
+                    
+                    addMessage("noor", msg.text);
+                    typingIndicator.style.display = "none";
+                    updateStatus("buffering");
+
+                    if (activeAudio) {
+                        activeAudio.pause();
+                    }
+                    activeAudio = new Audio(msg.audio);
+                    activeAudio.preload = "auto";
+                    
+                } else if (msg.type === "frame") {
+                    // Load frame image into buffer
+                    const img = new Image();
+                    img.onload = () => {
+                        frameBuffer[msg.index] = img;
+                        // Render first frame immediately to lock pose
+                        if (msg.index === 0 && currentStatusState === "buffering") {
+                            if (img.complete && img.naturalWidth !== 0) {
+                                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            }
+                        }
+                    };
+                    img.src = msg.image;
+
+                } else if (msg.type === "end") {
+                    console.log("All frames loaded. Playing response...");
+                    playSync();
+                } else if (msg.type === "error") {
+                    console.error("Server error:", msg.message);
+                    addMessage("system", "Error: " + msg.message);
+                    typingIndicator.style.display = "none";
+                    updateStatus("idle");
+                }
+            };
+        }
+
+        // Sync player using requestAnimationFrame
+        function playSync() {
+            if (!activeAudio) return;
+
+            updateStatus("speaking");
+            activeAudio.play().then(() => {
+                renderLoop();
+            }).catch(err => {
+                console.error("Audio play error:", err);
+                updateStatus("idle");
+            });
+        }
+
+        function renderLoop() {
+            if (!activeAudio || activeAudio.paused || activeAudio.ended) {
+                updateStatus("idle");
+                return;
+            }
+
+            const currentTime = activeAudio.currentTime;
+            const frameIndex = Math.floor(currentTime * 25);
+
+            if (frameIndex < totalFramesCount && frameBuffer[frameIndex]) {
+                const img = frameBuffer[frameIndex];
+                if (img.complete && img.naturalWidth !== 0) {
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                }
+            }
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        // Generate slow breathing idle loop from cached frames
+        function startIdleLoop() {
+            if (idleInterval) clearInterval(idleInterval);
+            idleInterval = setInterval(() => {
+                if (currentStatusState !== "idle") return;
+                if (idleFrames.length > 0) {
+                    const img = idleFrames[idleFrameIdx % idleFrames.length];
+                    if (img && img.complete && img.naturalWidth !== 0) {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    }
+                    idleFrameIdx++;
+                }
+            }, 120); // 8 FPS for a natural idle loop
+        }
+
+        // Preload first 50 frames from the static asset directory
+        function loadIdleFrames() {
+            idleFrames = [];
+            const IDLE_FRAME_COUNT = 60;
+            for (let i = 0; i < IDLE_FRAME_COUNT; i++) {
+                const img = new Image();
+                const frameNum = String(i).padStart(8, '0');
+                img.src = getServerUrl(`/full_imgs/${frameNum}.png`);
+                idleFrames.push(img);
+            }
+        }
+
+        // Reinitialize everything when server URL changes
+        function reinitialize() {
+            console.log("Server URL changed. Re-initializing WebSocket and cache...");
+            showHttpsWarningIfNeeded();
+            loadIdleFrames();
+            connectWS();
+        }
+
+        // Send ElevenLabs Preset
+        function playElevenLabsAudio() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                typingIndicator.style.display = "flex";
+                updateStatus("thinking");
+                ws.send(JSON.stringify({ text: "elevenlabs", elevenlabs: true }));
+            }
+        }
+
+        // Send Hardcoded TTS Preset
+        function playHardcodedTTS() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                typingIndicator.style.display = "flex";
+                updateStatus("thinking");
+                const hardcodedText = "Hello! I am Noor, your virtual zoo guide. Today, you will have the opportunity to discover a wonderful variety of animals from around the world, including majestic lions, gentle elephants, playful monkeys, colorful birds, and many more fascinating species. Feel free to ask me any questions throughout your visit. Let's begin our exciting journey into the amazing world of wildlife together.";
+                ws.send(JSON.stringify({ text: hardcodedText }));
+            }
+        }
+
+        // Send Custom Input Chat
+        function sendCustomChat(event) {
+            event.preventDefault();
+            const text = messageInput.value.trim();
+            if (!text) return;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                addMessage("user", text);
+                messageInput.value = "";
+                typingIndicator.style.display = "flex";
+                updateStatus("thinking");
+                ws.send(JSON.stringify({ text: text }));
+            } else {
+                addMessage("noor", "Error: Server connection offline. Cannot send message.");
+            }
+        }
+
+        // Load and Connect
+        loadIdleFrames();
+        connectWS();
+        startIdleLoop();
+    </script>
+</body>
+</html>

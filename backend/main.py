@@ -2,45 +2,38 @@ import sys
 import os
 import asyncio
 import threading
-import queue
 import copy
 import pickle
 import glob
-import shutil
-import yaml
+import uuid
+import base64
+import json
 import torch
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import edge_tts
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from aiortc import (
-    RTCPeerConnection,
-    RTCSessionDescription
-)
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
-# Add parent directory to path so we can import musetalk and scripts
+# Add parent directory to path so we can import musetalk modules
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.append(PARENT_DIR)
-if CURRENT_DIR not in sys.path:
-    sys.path.append(CURRENT_DIR)
 
 # Force the working directory to be the parent directory (ai-noor root)
-# so that all relative paths in musetalk and scripts resolve correctly.
 os.chdir(PARENT_DIR)
 print(f"[Backend] Forced working directory to: {os.getcwd()}")
 
-from musetalk.utils.utils import load_all_model
+from musetalk.utils.utils import load_all_model, datagen
 from musetalk.utils.audio_processor import AudioProcessor
 from musetalk.utils.face_parsing import FaceParsing
-from musetalk.utils.blending import get_image_prepare_material, get_image_blending
+from musetalk.utils.blending import get_image_blending
 from transformers import WhisperModel
-import scripts.realtime_inference as ri
-from avatar_track import AvatarTrack
 
-app = FastAPI()
+app = FastAPI(title="Noor AI WebSocket Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,286 +43,267 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pcs = set()
 UPLOAD_DIR = "data/audio"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-LAST_AUDIO_PATH = None
-_streamer = None
-streamer_lock = threading.Lock()
+app.mount("/audio", StaticFiles(directory="data/audio"), name="audio")
+app.mount("/full_imgs", StaticFiles(directory="results/v15/avatars/avator_1/full_imgs"), name="full_imgs")
 
+# Global models dictionary
+models = {}
 
-class MuseTalkStreamer:
-    def __init__(self):
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        print(f"[MuseTalk] Initializing MuseTalkStreamer on device: {self.device}")
-        
-        self.unet_model_path = "models/musetalkV15/unet.pth"
-        self.unet_config = "models/musetalkV15/musetalk.json"
-        self.whisper_dir = "models/whisper"
-        self.vae_type = "sd-vae"
-        self.version = "v15"
-        
-        if not os.path.exists(self.unet_model_path):
-            self.unet_model_path = "models/musetalk/pytorch_model.bin"
-            self.unet_config = "models/musetalk/musetalk.json"
-            self.version = "v1"
-            
-        print(f"[MuseTalk] Version selected: {self.version}")
-        
-        # Create mock args namespace for realtime_inference
-        class MockArgs:
-            version = "v15" if self.version == "v15" else "v1"
-            extra_margin = 10
-            parsing_mode = "jaw"
-            audio_padding_length_left = 2
-            audio_padding_length_right = 2
-            skip_save_images = True
-            ffmpeg_path = "ffmpeg"
-            gpu_id = 0
-            
-        ri.args = MockArgs()
-        ri.device = self.device
-        
-        # Load core weights
-        self.vae, self.unet, self.pe = load_all_model(
-            unet_model_path=self.unet_model_path,
-            vae_type=self.vae_type,
-            unet_config=self.unet_config,
-            device=self.device
-        )
-        self.timesteps = torch.tensor([0], device=self.device)
-
-        if torch.cuda.is_available():
-            self.pe = self.pe.half().to(self.device)
-            self.vae.vae = self.vae.vae.half().to(self.device)
-            self.unet.model = self.unet.model.half().to(self.device)
-            self.weight_dtype = torch.float16
-        else:
-            self.weight_dtype = torch.float32
-
-        # Initialize audio and whisper
-        self.audio_processor = AudioProcessor(feature_extractor_path=self.whisper_dir)
-        self.whisper = WhisperModel.from_pretrained(self.whisper_dir)
-        self.whisper = self.whisper.to(device=self.device, dtype=self.weight_dtype).eval()
-        self.whisper.requires_grad_(False)
-        
-        # Initialize Face Parsing
-        if self.version == "v15":
-            self.fp = FaceParsing(left_cheek_width=90, right_cheek_width=90)
-        else:
-            self.fp = FaceParsing()
-            
-        # Bind to realtime_inference module namespace
-        ri.vae = self.vae
-        ri.unet = self.unet
-        ri.pe = self.pe
-        ri.timesteps = self.timesteps
-        ri.whisper = self.whisper
-        ri.audio_processor = self.audio_processor
-        ri.fp = self.fp
-        print("[MuseTalk] MuseTalkStreamer successfully loaded.")
-
-
-def get_streamer():
-    global _streamer
-    with streamer_lock:
-        if _streamer is None:
-            _streamer = MuseTalkStreamer()
-        return _streamer
-
-
-class StreamingAvatar(ri.Avatar):
-    def __init__(self, avatar_id, video_path, bbox_shift, batch_size, preparation, webrtc_queue: asyncio.Queue, loop):
-        self.webrtc_queue = webrtc_queue
-        self.loop = loop
-        super().__init__(avatar_id, video_path, bbox_shift, batch_size, preparation)
-
-    def process_frames(self, res_frame_queue, video_len, skip_save_images):
-        print(f"[StreamingAvatar] Rendering {video_len} frames to WebRTC stream...")
-        while True:
-            if self.idx >= video_len:
-                break
-            try:
-                res_frame = res_frame_queue.get(block=True, timeout=1)
-            except queue.Empty:
-                continue
-
-            bbox = self.coord_list_cycle[self.idx % (len(self.coord_list_cycle))]
-            ori_frame = copy.deepcopy(self.frame_list_cycle[self.idx % (len(self.frame_list_cycle))])
-            x1, y1, x2, y2 = bbox
-            try:
-                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
-            except Exception as e:
-                print("[StreamingAvatar] Resize error:", e)
-                continue
-            mask = self.mask_list_cycle[self.idx % (len(self.mask_list_cycle))]
-            mask_crop_box = self.mask_coords_list_cycle[self.idx % (len(self.mask_coords_list_cycle))]
-            combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-
-            # Safely push frame to asyncio queue in event loop thread
-            self.loop.call_soon_threadsafe(self.webrtc_queue.put_nowait, combine_frame)
-            self.idx = self.idx + 1
-
-
-@app.get("/")
-def health():
-    return {"status": "ok", "loaded": _streamer is not None}
-
-
-@app.post("/generate")
-async def generate(file: UploadFile = File(...)):
-    global LAST_AUDIO_PATH
-    try:
-        # Save uploaded audio
-        audio_path = os.path.join(
-            UPLOAD_DIR,
-            file.filename
-        )
-        with open(audio_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        print(f"Audio saved: {audio_path}")
-        LAST_AUDIO_PATH = audio_path
-
-        # Update realtime config yaml
-        try:
-            with open("configs/inference/realtime.yaml", "r") as f:
-                config = yaml.safe_load(f)
-            config["avator_1"]["audio_clips"] = {
-                "audio_0": audio_path
-            }
-            config["avator_1"]["preparation"] = False
-            with open("configs/inference/realtime.yaml", "w") as f:
-                yaml.dump(config, f)
-        except Exception as e:
-            print("Config yaml update skipped/failed:", e)
-
-        # Trigger in-process fast inference
-        print("Starting in-process fast MuseTalk inference...")
-        streamer = get_streamer() # ensure loaded
-        
-        avatar_id = "avator_1"
-        base_path = f"./results/v15/avatars/{avatar_id}"
-        preparation = not os.path.exists(base_path)
-        
-        # standard Avatar class to write files to disk
-        avatar = ri.Avatar(
-            avatar_id=avatar_id,
-            video_path="data/video/yongen.mp4",
-            bbox_shift=5,
-            batch_size=8,
-            preparation=preparation
-        )
-        
-        avatar.inference(
-            audio_path=audio_path,
-            out_vid_name="output_video",
-            fps=25,
-            skip_save_images=False
-        )
-
-        output_vid = os.path.join(avatar.video_out_path, "output_video.mp4")
-        if not os.path.exists(output_vid):
-            raise Exception("No video generated by MuseTalk")
-
-        print(f"In-process MuseTalk completed. Returning: {output_vid}")
-        return FileResponse(
-            path=output_vid,
-            media_type="video/mp4",
-            filename=os.path.basename(output_vid)
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-
-@app.post("/offer")
-async def offer(data: dict):
-    print("=" * 50)
-    print("SDP OFFER RECEIVED")
-    print("=" * 50)
+@app.on_event("startup")
+async def startup_event():
+    print("Loading MuseTalk models and pre-caching avatar...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    pc = RTCPeerConnection()
-    pcs.add(pc)
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        print(f"Connection state is {pc.connectionState}")
-        if pc.connectionState in ["failed", "closed"]:
-            await pc.close()
-            pcs.discard(pc)
-
-    await pc.setRemoteDescription(
-        RTCSessionDescription(
-            sdp=data["sdp"],
-            type=data["type"]
-        )
+    unet_model_path = "models/musetalkV15/unet.pth"
+    unet_config = "models/musetalkV15/musetalk.json"
+    vae_type = "sd-vae"
+    whisper_dir = "models/whisper"
+    
+    # Load core models
+    vae, unet, pe = load_all_model(
+        unet_model_path=unet_model_path, 
+        vae_type=vae_type,
+        unet_config=unet_config,
+        device=device
     )
-
-    audio_path = data.get("audio_path")
-    if not audio_path:
-        audio_path = LAST_AUDIO_PATH
-
-    # If audio is available, spin up the real-time MuseTalk streaming track
-    if audio_path and os.path.exists(audio_path):
-        print(f"Initiating realtime MuseTalk avatar stream for audio: {audio_path}")
-        webrtc_queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
-        
-        # Load/get models
-        streamer = get_streamer()
-        
-        avatar_id = "avator_1"
-        base_path = f"./results/v15/avatars/{avatar_id}"
-        preparation = not os.path.exists(base_path)
-        
-        # Initialize StreamingAvatar subclass
-        avatar = StreamingAvatar(
-            avatar_id=avatar_id,
-            video_path="data/video/yongen.mp4",
-            bbox_shift=5,
-            batch_size=8,
-            preparation=preparation,
-            webrtc_queue=webrtc_queue,
-            loop=loop
-        )
-
-        # Run MuseTalk loop inside background thread to keep FastAPI responsive
-        def run_thread():
-            try:
-                avatar.inference(
-                    audio_path=audio_path,
-                    out_vid_name=None,
-                    fps=25,
-                    skip_save_images=True
-                )
-            except Exception as e:
-                print("Error in background streaming thread:", e)
-                
-        t = threading.Thread(target=run_thread)
-        t.start()
-        
-        # Add the real-time Queue-based track to peer connection
-        pc.addTrack(AvatarTrack(frame_queue=webrtc_queue))
+    timesteps = torch.tensor([0], device=device)
+    
+    # Use float16 for high-speed inference on GPU
+    use_float16 = torch.cuda.is_available()
+    if use_float16:
+        pe = pe.half()
+        vae.vae = vae.vae.half()
+        unet.model = unet.model.half()
+        weight_dtype = torch.float16
     else:
-        # Fallback to default avatar looping (no audio)
-        print("No audio input or path found. Streaming default avatar on loop.")
-        pc.addTrack(AvatarTrack())
+        weight_dtype = torch.float32
+        
+    pe = pe.to(device)
+    vae.vae = vae.vae.to(device)
+    unet.model = unet.model.to(device)
+    
+    # Load Whisper audio models
+    audio_processor = AudioProcessor(feature_extractor_path=whisper_dir)
+    whisper = WhisperModel.from_pretrained(whisper_dir)
+    whisper = whisper.to(device=device, dtype=weight_dtype).eval()
+    whisper.requires_grad_(False)
+    
+    # Face parser
+    fp = FaceParsing(left_cheek_width=90, right_cheek_width=90)
+    
+    # Load avatar cache (avator_1 avatar)
+    avatar_dir = "results/v15/avatars/avator_1"
+    if not os.path.exists(avatar_dir):
+        raise RuntimeError(f"Avatar cache at {avatar_dir} not found. Please run the material preparation script first!")
+        
+    latents_path = os.path.join(avatar_dir, "latents.pt")
+    coords_path = os.path.join(avatar_dir, "coords.pkl")
+    mask_coords_path = os.path.join(avatar_dir, "mask_coords.pkl")
+    full_imgs_dir = os.path.join(avatar_dir, "full_imgs")
+    mask_dir = os.path.join(avatar_dir, "mask")
+    
+    # Load pre-computed coordinates, latents and blend masks
+    input_latent_list_cycle = torch.load(latents_path)
+    with open(coords_path, 'rb') as f:
+        coord_list_cycle = pickle.load(f)
+    with open(mask_coords_path, 'rb') as f:
+        mask_coords_list_cycle = pickle.load(f)
+        
+    # Read background images into memory
+    input_img_list = sorted(glob.glob(os.path.join(full_imgs_dir, '*.png')))
+    frame_list_cycle = []
+    print(f"Reading {len(input_img_list)} background images into memory...")
+    for img_path in input_img_list:
+        frame_list_cycle.append(cv2.imread(img_path))
+        
+    # Read mask images into memory
+    input_mask_list = sorted(glob.glob(os.path.join(mask_dir, '*.png')))
+    mask_list_cycle = []
+    print(f"Reading {len(input_mask_list)} mask images into memory...")
+    for mask_path in input_mask_list:
+        mask_list_cycle.append(cv2.imread(mask_path))
+        
+    models.update({
+        "vae": vae,
+        "unet": unet,
+        "pe": pe,
+        "timesteps": timesteps,
+        "weight_dtype": weight_dtype,
+        "audio_processor": audio_processor,
+        "whisper": whisper,
+        "fp": fp,
+        "device": device,
+        "input_latent_list_cycle": input_latent_list_cycle,
+        "coord_list_cycle": coord_list_cycle,
+        "mask_coords_list_cycle": mask_coords_list_cycle,
+        "frame_list_cycle": frame_list_cycle,
+        "mask_list_cycle": mask_list_cycle
+    })
+    print("All MuseTalk models and avatar cached data loaded successfully!")
 
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
 
-    return {
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type
-    }
+@app.get("/", response_class=HTMLResponse)
+def index():
+    try:
+        with open("backend/index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"<h3>index.html not found: {str(e)}</h3>"
 
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
-    pcs.clear()
+@app.get("/portal-resolver")
+def portal_resolver():
+    return {"status": "ok"}
+
+
+@app.websocket("/chat")
+async def websocket_chat(websocket: WebSocket):
+    await websocket.accept()
+    print("WebSocket client connected.")
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            print(f"[WS] Received message payload: {data}")
+            message = json.loads(data)
+            user_text = message.get("text", "")
+            is_elevenlabs = message.get("elevenlabs", False)
+            print(f"[WS] Decoded message - User text: '{user_text}', ElevenLabs: {is_elevenlabs}")
+            
+            if is_elevenlabs:
+                audio_path = "data/audio/11lab-audio-noor.mp3"
+                response_text = "Playing pre-saved ElevenLabs audio demo."
+                print(f"[WS] ElevenLabs mode selected. Using pre-saved audio: {audio_path}")
+                if not os.path.exists(audio_path):
+                    # Copy fallback from assets if not exists
+                    assets_audio = "assets/11lab-audio-noor.mp3"
+                    print(f"[WS] Pre-saved audio not found. Copying from {assets_audio}...")
+                    if os.path.exists(assets_audio):
+                        os.makedirs("data/audio", exist_ok=True)
+                        import shutil
+                        shutil.copy(assets_audio, audio_path)
+            else:
+                response_text = user_text
+                audio_filename = f"tts_{uuid.uuid4().hex}.mp3"
+                audio_path = os.path.join(UPLOAD_DIR, audio_filename)
+                
+                tts_text = response_text.replace("species", "spee-sheez")
+                print(f"[WS] Edge-TTS mode selected. Generating audio for: '{tts_text}' -> file: {audio_path}")
+                communicate = edge_tts.Communicate(tts_text, "en-US-JennyNeural")
+                await communicate.save(audio_path)
+                print(f"[WS] Edge-TTS audio generated successfully.")
+            
+            # Extract Whisper features
+            print(f"[WS] Extracting Whisper audio features from {audio_path}...")
+            audio_processor = models["audio_processor"]
+            device = models["device"]
+            weight_dtype = models["weight_dtype"]
+            whisper = models["whisper"]
+            pe = models["pe"]
+            unet = models["unet"]
+            vae = models["vae"]
+            timesteps = models["timesteps"]
+            
+            whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
+            whisper_chunks = audio_processor.get_whisper_chunk(
+                whisper_input_features,
+                device,
+                weight_dtype,
+                whisper,
+                librosa_length,
+                fps=25,
+                audio_padding_length_left=2,
+                audio_padding_length_right=2
+            )
+            
+            video_num = len(whisper_chunks)
+            print(f"[WS] Whisper feature extraction complete. Total chunks/frames: {video_num}")
+            
+            # Load audio bytes to send to frontend
+            print(f"[WS] Loading audio bytes to base64...")
+            with open(audio_path, "rb") as f:
+                audio_bytes = f.read()
+                audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+                
+            # Send initial metadata
+            print(f"[WS] Sending start signal payload to client...")
+            await websocket.send_text(json.dumps({
+                "type": "start",
+                "text": response_text,
+                "audio": f"data:audio/mp3;base64,{audio_base64}",
+                "total_frames": video_num
+            }))
+            
+            batch_size = 8
+            print(f"[WS] Initializing datagen batch generator with batch_size={batch_size}...")
+            gen = datagen(
+                whisper_chunks,
+                models["input_latent_list_cycle"],
+                batch_size
+            )
+            
+            frame_idx = 0
+            coord_list_cycle = models["coord_list_cycle"]
+            frame_list_cycle = models["frame_list_cycle"]
+            mask_list_cycle = models["mask_list_cycle"]
+            mask_coords_list_cycle = models["mask_coords_list_cycle"]
+            
+            print(f"[WS] Starting MuseTalk model inference & frames streaming loop...")
+            for whisper_batch, latent_batch in gen:
+                audio_feature_batch = pe(whisper_batch.to(device))
+                latent_batch = latent_batch.to(device=device, dtype=unet.model.dtype)
+                
+                pred_latents = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feature_batch).sample
+                pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
+                recon = vae.decode_latents(pred_latents)
+                
+                for res_frame in recon:
+                    bbox = coord_list_cycle[frame_idx % (len(coord_list_cycle))]
+                    ori_frame = copy.deepcopy(frame_list_cycle[frame_idx % (len(frame_list_cycle))])
+                    x1, y1, x2, y2 = bbox
+                    
+                    try:
+                        res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
+                    except Exception as e:
+                        print(f"[WS] Warning: Failed to resize frame {frame_idx}: {e}")
+                        frame_idx += 1
+                        continue
+                        
+                    mask = mask_list_cycle[frame_idx % (len(mask_list_cycle))]
+                    mask_crop_box = mask_coords_list_cycle[frame_idx % (len(mask_coords_list_cycle))]
+                    
+                    combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
+                    
+                    _, buffer = cv2.imencode('.jpg', combine_frame)
+                    frame_base64 = base64.b64encode(buffer).decode("utf-8")
+                    
+                    await websocket.send_text(json.dumps({
+                        "type": "frame",
+                        "index": frame_idx,
+                        "image": f"data:image/jpeg;base64,{frame_base64}"
+                    }))
+                    
+                    if frame_idx % 25 == 0 or frame_idx == video_num - 1:
+                        print(f"[WS] Sent frame {frame_idx + 1}/{video_num} to client.")
+                        
+                    await asyncio.sleep(0.002)
+                    frame_idx += 1
+                    
+            await websocket.send_text(json.dumps({"type": "end"}))
+            print("[WS] Sent end signal to client. Successfully streamed all video frames.")
+            
+    except WebSocketDisconnect:
+        print("WebSocket client disconnected.")
+    except Exception as e:
+        print(f"[WS] Exception raised in WebSocket loop: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": f"Server error: {str(e)}"
+            }))
+        except Exception as send_err:
+            print(f"Failed to send error details to client: {send_err}")
