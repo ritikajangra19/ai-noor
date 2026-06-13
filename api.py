@@ -19,6 +19,11 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/portal-resolver")
+def portal_resolver():
+    return {"status": "ok"}
+
+
 @app.post("/generate")
 async def generate(file: UploadFile = File(...)):
     try:
