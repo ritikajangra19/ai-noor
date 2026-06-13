@@ -557,17 +557,17 @@
         let frameBuffer = [];
         let totalFramesCount = 0;
         let activeAudio = null;
-        
+
+        // Progressive playback: start after buffering this many decoded frames
+        // 12 frames = 0.48 s at 25 fps — enough to hide any jitter
+        const BUFFER_BEFORE_PLAY = 12;
+        let bufferedCount = 0;
+        let playbackStarted = false;
+
         let idleFrames = [];
         let idleFrameIdx = 0;
         let idleInterval = null;
         let currentStatusState = "idle";
-
-        // Helper helper because python uses json.dumps and JS uses JSON.stringify
-        const json = {
-            dumps: JSON.stringify,
-            loads: JSON.parse
-        };
 
         // Determine base HTTP & WS URLs
         function getServerUrl(path) {
@@ -697,40 +697,55 @@
                 const msg = JSON.parse(event.data);
 
                 if (msg.type === "start") {
-                    console.log("Received start signal. Total frames:", msg.total_frames);
+                    // Server has finished TTS + Whisper and is about to stream
+                    // frames. Prepare audio and buffer state immediately.
+                    console.log("start — total frames:", msg.total_frames);
                     totalFramesCount = msg.total_frames;
                     frameBuffer = new Array(totalFramesCount);
-                    
+                    bufferedCount = 0;
+                    playbackStarted = false;
+
                     addMessage("noor", msg.text);
                     typingIndicator.style.display = "none";
                     updateStatus("buffering");
 
-                    if (activeAudio) {
-                        activeAudio.pause();
-                    }
+                    if (activeAudio) { activeAudio.pause(); }
                     activeAudio = new Audio(msg.audio);
                     activeAudio.preload = "auto";
-                    
+
                 } else if (msg.type === "frame") {
-                    // Load frame image into buffer
+                    const idx = msg.index;
                     const img = new Image();
                     img.onload = () => {
-                        frameBuffer[msg.index] = img;
-                        // Render first frame immediately to lock pose
-                        if (msg.index === 0 && currentStatusState === "buffering") {
-                            if (img.complete && img.naturalWidth !== 0) {
-                                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                            }
+                        frameBuffer[idx] = img;
+                        bufferedCount++;
+
+                        // Snap first frame onto canvas so avatar isn't blank
+                        if (idx === 0) {
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        }
+
+                        // Progressive playback: start once we have enough
+                        // frames decoded so audio and video stay in sync
+                        if (!playbackStarted && bufferedCount >= BUFFER_BEFORE_PLAY) {
+                            playbackStarted = true;
+                            playSync();
                         }
                     };
                     img.src = msg.image;
 
                 } else if (msg.type === "end") {
-                    console.log("All frames loaded. Playing response...");
-                    playSync();
+                    // All frames sent — trigger play for short clips or slow
+                    // networks that never hit BUFFER_BEFORE_PLAY threshold
+                    console.log("end — all frames sent.");
+                    if (!playbackStarted) {
+                        playbackStarted = true;
+                        playSync();
+                    }
+
                 } else if (msg.type === "error") {
                     console.error("Server error:", msg.message);
-                    addMessage("system", "Error: " + msg.message);
+                    addMessage("noor", "Error: " + msg.message);
                     typingIndicator.style.display = "none";
                     updateStatus("idle");
                 }
@@ -756,14 +771,17 @@
                 return;
             }
 
-            const currentTime = activeAudio.currentTime;
-            const frameIndex = Math.floor(currentTime * 25);
+            const targetIdx = Math.min(
+                Math.floor(activeAudio.currentTime * 25),
+                totalFramesCount - 1
+            );
 
-            if (frameIndex < totalFramesCount && frameBuffer[frameIndex]) {
-                const img = frameBuffer[frameIndex];
-                if (img.complete && img.naturalWidth !== 0) {
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                }
+            // Draw target frame when it's decoded. If the frame hasn't
+            // arrived from the server yet, the canvas retains the last
+            // drawn frame — no flicker, no blank canvas.
+            const img = frameBuffer[targetIdx];
+            if (img && img.complete && img.naturalWidth !== 0) {
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             }
 
             requestAnimationFrame(renderLoop);

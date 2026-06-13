@@ -1,8 +1,6 @@
 import sys
 import os
 import asyncio
-import threading
-import copy
 import pickle
 import glob
 import uuid
@@ -12,20 +10,18 @@ import torch
 import cv2
 import numpy as np
 import edge_tts
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-# Add parent directory to path so we can import musetalk modules
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.append(PARENT_DIR)
 
-# Force the working directory to be the parent directory (ai-noor root)
 os.chdir(PARENT_DIR)
-print(f"[Backend] Forced working directory to: {os.getcwd()}")
+print(f"[Backend] Working directory: {os.getcwd()}")
 
 from musetalk.utils.utils import load_all_model, datagen
 from musetalk.utils.audio_processor import AudioProcessor
@@ -48,29 +44,27 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory="data/audio"), name="audio")
 app.mount("/full_imgs", StaticFiles(directory="results/v15/avatars/avator_1/full_imgs"), name="full_imgs")
 
-# Global models dictionary
 models = {}
+
+# Quality 82 balances visual fidelity vs bandwidth for streaming
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 82]
+# 16 gives better GPU utilization without OOM risk on most cards
+_BATCH_SIZE = 16
+
 
 @app.on_event("startup")
 async def startup_event():
     print("Loading MuseTalk models and pre-caching avatar...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    unet_model_path = "models/musetalkV15/unet.pth"
-    unet_config = "models/musetalkV15/musetalk.json"
-    vae_type = "sd-vae"
-    whisper_dir = "models/whisper"
-    
-    # Load core models
+
     vae, unet, pe = load_all_model(
-        unet_model_path=unet_model_path, 
-        vae_type=vae_type,
-        unet_config=unet_config,
-        device=device
+        unet_model_path="models/musetalkV15/unet.pth",
+        vae_type="sd-vae",
+        unet_config="models/musetalkV15/musetalk.json",
+        device=device,
     )
     timesteps = torch.tensor([0], device=device)
-    
-    # Use float16 for high-speed inference on GPU
+
     use_float16 = torch.cuda.is_available()
     if use_float16:
         pe = pe.half()
@@ -79,52 +73,40 @@ async def startup_event():
         weight_dtype = torch.float16
     else:
         weight_dtype = torch.float32
-        
+
     pe = pe.to(device)
     vae.vae = vae.vae.to(device)
     unet.model = unet.model.to(device)
-    
-    # Load Whisper audio models
-    audio_processor = AudioProcessor(feature_extractor_path=whisper_dir)
-    whisper = WhisperModel.from_pretrained(whisper_dir)
+
+    audio_processor = AudioProcessor(feature_extractor_path="models/whisper")
+    whisper = WhisperModel.from_pretrained("models/whisper")
     whisper = whisper.to(device=device, dtype=weight_dtype).eval()
     whisper.requires_grad_(False)
-    
-    # Face parser
+
     fp = FaceParsing(left_cheek_width=90, right_cheek_width=90)
-    
-    # Load avatar cache (avator_1 avatar)
+
     avatar_dir = "results/v15/avatars/avator_1"
     if not os.path.exists(avatar_dir):
-        raise RuntimeError(f"Avatar cache at {avatar_dir} not found. Please run the material preparation script first!")
-        
-    latents_path = os.path.join(avatar_dir, "latents.pt")
-    coords_path = os.path.join(avatar_dir, "coords.pkl")
-    mask_coords_path = os.path.join(avatar_dir, "mask_coords.pkl")
-    full_imgs_dir = os.path.join(avatar_dir, "full_imgs")
-    mask_dir = os.path.join(avatar_dir, "mask")
-    
-    # Load pre-computed coordinates, latents and blend masks
-    input_latent_list_cycle = torch.load(latents_path)
-    with open(coords_path, 'rb') as f:
+        raise RuntimeError(
+            f"Avatar cache at {avatar_dir} not found. "
+            "Run the material preparation script first."
+        )
+
+    input_latent_list_cycle = torch.load(os.path.join(avatar_dir, "latents.pt"))
+
+    with open(os.path.join(avatar_dir, "coords.pkl"), "rb") as f:
         coord_list_cycle = pickle.load(f)
-    with open(mask_coords_path, 'rb') as f:
+    with open(os.path.join(avatar_dir, "mask_coords.pkl"), "rb") as f:
         mask_coords_list_cycle = pickle.load(f)
-        
-    # Read background images into memory
-    input_img_list = sorted(glob.glob(os.path.join(full_imgs_dir, '*.png')))
-    frame_list_cycle = []
-    print(f"Reading {len(input_img_list)} background images into memory...")
-    for img_path in input_img_list:
-        frame_list_cycle.append(cv2.imread(img_path))
-        
-    # Read mask images into memory
-    input_mask_list = sorted(glob.glob(os.path.join(mask_dir, '*.png')))
-    mask_list_cycle = []
-    print(f"Reading {len(input_mask_list)} mask images into memory...")
-    for mask_path in input_mask_list:
-        mask_list_cycle.append(cv2.imread(mask_path))
-        
+
+    input_img_list = sorted(glob.glob(os.path.join(avatar_dir, "full_imgs", "*.png")))
+    frame_list_cycle = [cv2.imread(p) for p in input_img_list]
+    print(f"Loaded {len(frame_list_cycle)} background frames into RAM.")
+
+    input_mask_list = sorted(glob.glob(os.path.join(avatar_dir, "mask", "*.png")))
+    mask_list_cycle = [cv2.imread(p) for p in input_mask_list]
+    print(f"Loaded {len(mask_list_cycle)} mask images into RAM.")
+
     models.update({
         "vae": vae,
         "unet": unet,
@@ -139,9 +121,9 @@ async def startup_event():
         "coord_list_cycle": coord_list_cycle,
         "mask_coords_list_cycle": mask_coords_list_cycle,
         "frame_list_cycle": frame_list_cycle,
-        "mask_list_cycle": mask_list_cycle
+        "mask_list_cycle": mask_list_cycle,
     })
-    print("All MuseTalk models and avatar cached data loaded successfully!")
+    print("All models and avatar cache loaded successfully.")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -150,7 +132,7 @@ def index():
         with open("backend/index.html", "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
-        return f"<h3>index.html not found: {str(e)}</h3>"
+        return f"<h3>index.html not found: {e}</h3>"
 
 
 @app.get("/portal-resolver")
@@ -161,149 +143,162 @@ def portal_resolver():
 @app.websocket("/chat")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
-    print("WebSocket client connected.")
-    
+    print("[WS] Client connected.")
+
+    loop = asyncio.get_event_loop()
+
     try:
         while True:
             data = await websocket.receive_text()
-            print(f"[WS] Received message payload: {data}")
             message = json.loads(data)
             user_text = message.get("text", "")
             is_elevenlabs = message.get("elevenlabs", False)
-            print(f"[WS] Decoded message - User text: '{user_text}', ElevenLabs: {is_elevenlabs}")
-            
+
+            # ── Step 1: TTS ──────────────────────────────────────────────────
             if is_elevenlabs:
                 audio_path = "data/audio/11lab-audio-noor.mp3"
                 response_text = "Playing pre-saved ElevenLabs audio demo."
-                print(f"[WS] ElevenLabs mode selected. Using pre-saved audio: {audio_path}")
                 if not os.path.exists(audio_path):
-                    # Copy fallback from assets if not exists
                     assets_audio = "assets/11lab-audio-noor.mp3"
-                    print(f"[WS] Pre-saved audio not found. Copying from {assets_audio}...")
                     if os.path.exists(assets_audio):
-                        os.makedirs("data/audio", exist_ok=True)
                         import shutil
+                        os.makedirs("data/audio", exist_ok=True)
                         shutil.copy(assets_audio, audio_path)
             else:
                 response_text = user_text
                 audio_filename = f"tts_{uuid.uuid4().hex}.mp3"
                 audio_path = os.path.join(UPLOAD_DIR, audio_filename)
-                
                 tts_text = response_text.replace("species", "spee-sheez")
-                print(f"[WS] Edge-TTS mode selected. Generating audio for: '{tts_text}' -> file: {audio_path}")
                 communicate = edge_tts.Communicate(tts_text, "en-US-JennyNeural")
                 await communicate.save(audio_path)
-                print(f"[WS] Edge-TTS audio generated successfully.")
-            
-            # Extract Whisper features
-            print(f"[WS] Extracting Whisper audio features from {audio_path}...")
+                print(f"[WS] TTS saved: {audio_path}")
+
+            # ── Step 2: Whisper feature extraction in thread pool ────────────
+            # run_in_executor prevents GPU/CPU work from blocking the event
+            # loop so WebSocket keep-alives and disconnect events still fire.
             audio_processor = models["audio_processor"]
             device = models["device"]
             weight_dtype = models["weight_dtype"]
-            whisper = models["whisper"]
+            whisper_model = models["whisper"]
+
+            whisper_input_features, librosa_length = await loop.run_in_executor(
+                None,
+                lambda: audio_processor.get_audio_feature(
+                    audio_path, weight_dtype=weight_dtype
+                ),
+            )
+
+            def _extract_chunks():
+                with torch.no_grad():
+                    return audio_processor.get_whisper_chunk(
+                        whisper_input_features,
+                        device,
+                        weight_dtype,
+                        whisper_model,
+                        librosa_length,
+                        fps=25,
+                        audio_padding_length_left=2,
+                        audio_padding_length_right=2,
+                    )
+
+            whisper_chunks = await loop.run_in_executor(None, _extract_chunks)
+            video_num = len(whisper_chunks)
+            print(f"[WS] Whisper done — {video_num} frames to generate.")
+
+            # ── Step 3: Send START signal with audio NOW (before UNet runs) ──
+            # Client receives audio + frame count and can start buffering
+            # immediately. Progressive frames arrive as UNet generates them.
+            with open(audio_path, "rb") as f:
+                audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            await websocket.send_text(json.dumps({
+                "type": "start",
+                "text": response_text,
+                "audio": f"data:audio/mp3;base64,{audio_b64}",
+                "total_frames": video_num,
+            }))
+
+            # ── Step 4: UNet inference + progressive frame streaming ─────────
             pe = models["pe"]
             unet = models["unet"]
             vae = models["vae"]
             timesteps = models["timesteps"]
-            
-            whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
-            whisper_chunks = audio_processor.get_whisper_chunk(
-                whisper_input_features,
-                device,
-                weight_dtype,
-                whisper,
-                librosa_length,
-                fps=25,
-                audio_padding_length_left=2,
-                audio_padding_length_right=2
-            )
-            
-            video_num = len(whisper_chunks)
-            print(f"[WS] Whisper feature extraction complete. Total chunks/frames: {video_num}")
-            
-            # Load audio bytes to send to frontend
-            print(f"[WS] Loading audio bytes to base64...")
-            with open(audio_path, "rb") as f:
-                audio_bytes = f.read()
-                audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
-                
-            # Send initial metadata
-            print(f"[WS] Sending start signal payload to client...")
-            await websocket.send_text(json.dumps({
-                "type": "start",
-                "text": response_text,
-                "audio": f"data:audio/mp3;base64,{audio_base64}",
-                "total_frames": video_num
-            }))
-            
-            batch_size = 8
-            print(f"[WS] Initializing datagen batch generator with batch_size={batch_size}...")
-            gen = datagen(
-                whisper_chunks,
-                models["input_latent_list_cycle"],
-                batch_size
-            )
-            
-            frame_idx = 0
             coord_list_cycle = models["coord_list_cycle"]
             frame_list_cycle = models["frame_list_cycle"]
             mask_list_cycle = models["mask_list_cycle"]
             mask_coords_list_cycle = models["mask_coords_list_cycle"]
-            
-            print(f"[WS] Starting MuseTalk model inference & frames streaming loop...")
+
+            gen = datagen(
+                whisper_chunks,
+                models["input_latent_list_cycle"],
+                _BATCH_SIZE,
+            )
+
+            frame_idx = 0
             for whisper_batch, latent_batch in gen:
-                audio_feature_batch = pe(whisper_batch.to(device))
-                latent_batch = latent_batch.to(device=device, dtype=unet.model.dtype)
-                
-                pred_latents = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feature_batch).sample
-                pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
-                recon = vae.decode_latents(pred_latents)
-                
+                # Capture loop variables for the closure
+                wb, lb = whisper_batch, latent_batch
+
+                def _infer(wb=wb, lb=lb):
+                    with torch.no_grad():
+                        af = pe(wb.to(device))
+                        lb = lb.to(device=device, dtype=unet.model.dtype)
+                        pred = unet.model(
+                            lb, timesteps, encoder_hidden_states=af
+                        ).sample
+                        pred = pred.to(device=device, dtype=vae.vae.dtype)
+                        return vae.decode_latents(pred)
+
+                recon = await loop.run_in_executor(None, _infer)
+
                 for res_frame in recon:
-                    bbox = coord_list_cycle[frame_idx % (len(coord_list_cycle))]
-                    ori_frame = copy.deepcopy(frame_list_cycle[frame_idx % (len(frame_list_cycle))])
+                    bbox = coord_list_cycle[frame_idx % len(coord_list_cycle)]
+                    # .copy() avoids the overhead of copy.deepcopy for ndarray
+                    ori_frame = frame_list_cycle[frame_idx % len(frame_list_cycle)].copy()
                     x1, y1, x2, y2 = bbox
-                    
+
                     try:
-                        res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
-                    except Exception as e:
-                        print(f"[WS] Warning: Failed to resize frame {frame_idx}: {e}")
+                        res_frame = cv2.resize(
+                            res_frame.astype(np.uint8), (x2 - x1, y2 - y1)
+                        )
+                    except Exception:
                         frame_idx += 1
                         continue
-                        
-                    mask = mask_list_cycle[frame_idx % (len(mask_list_cycle))]
-                    mask_crop_box = mask_coords_list_cycle[frame_idx % (len(mask_coords_list_cycle))]
-                    
-                    combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-                    
-                    _, buffer = cv2.imencode('.jpg', combine_frame)
-                    frame_base64 = base64.b64encode(buffer).decode("utf-8")
-                    
+
+                    mask = mask_list_cycle[frame_idx % len(mask_list_cycle)]
+                    mask_crop_box = mask_coords_list_cycle[
+                        frame_idx % len(mask_coords_list_cycle)
+                    ]
+                    combined = get_image_blending(
+                        ori_frame, res_frame, bbox, mask, mask_crop_box
+                    )
+
+                    _, buf = cv2.imencode(".jpg", combined, _JPEG_PARAMS)
+                    frame_b64 = base64.b64encode(buf).decode("utf-8")
+
                     await websocket.send_text(json.dumps({
                         "type": "frame",
                         "index": frame_idx,
-                        "image": f"data:image/jpeg;base64,{frame_base64}"
+                        "image": f"data:image/jpeg;base64,{frame_b64}",
                     }))
-                    
-                    if frame_idx % 25 == 0 or frame_idx == video_num - 1:
-                        print(f"[WS] Sent frame {frame_idx + 1}/{video_num} to client.")
-                        
-                    await asyncio.sleep(0.002)
+
+                    # asyncio.sleep(0) yields to the event loop with zero delay
+                    # so disconnect/keepalive messages are processed between frames
+                    await asyncio.sleep(0)
                     frame_idx += 1
-                    
+
             await websocket.send_text(json.dumps({"type": "end"}))
-            print("[WS] Sent end signal to client. Successfully streamed all video frames.")
-            
+            print(f"[WS] Done — streamed {frame_idx} frames.")
+
     except WebSocketDisconnect:
-        print("WebSocket client disconnected.")
+        print("[WS] Client disconnected.")
     except Exception as e:
-        print(f"[WS] Exception raised in WebSocket loop: {e}")
         import traceback
         traceback.print_exc()
         try:
             await websocket.send_text(json.dumps({
                 "type": "error",
-                "message": f"Server error: {str(e)}"
+                "message": str(e),
             }))
-        except Exception as send_err:
-            print(f"Failed to send error details to client: {send_err}")
+        except Exception:
+            pass
