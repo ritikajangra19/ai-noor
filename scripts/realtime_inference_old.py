@@ -18,26 +18,12 @@ from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from musetalk.utils.blending import get_image_prepare_material, get_image_blending
 from musetalk.utils.utils import load_all_model
 from musetalk.utils.audio_processor import AudioProcessor
-from types import SimpleNamespace
 
 import shutil
 import threading
 import queue
 import time
 import subprocess
-
-STREAM_QUEUE = queue.Queue(maxsize=500)
-
-vae = None
-unet = None
-pe = None
-whisper = None
-audio_processor = None
-fp = None
-device = None
-timesteps = None
-args = None
-weight_dtype = None
 
 
 def fast_check_ffmpeg():
@@ -67,8 +53,8 @@ def osmakedirs(path_list):
         os.makedirs(path) if not os.path.exists(path) else None
 
 
+@torch.no_grad()
 class Avatar:
-    @torch.no_grad()
     def __init__(self, avatar_id, video_path, bbox_shift, batch_size, preparation):
         self.avatar_id = avatar_id
         self.video_path = video_path
@@ -159,7 +145,6 @@ class Avatar:
                 input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
                 self.mask_list_cycle = read_imgs(input_mask_list)
 
-    @torch.no_grad()
     def prepare_material(self):
         print("preparing data materials ... ...")
         with open(self.avatar_info_path, "w") as f:
@@ -224,7 +209,6 @@ class Avatar:
 
         torch.save(self.input_latent_list_cycle, os.path.join(self.latents_out_path))
 
-    @torch.no_grad()
     def process_frames(self, res_frame_queue, video_len, skip_save_images):
         print(video_len)
         while True:
@@ -246,7 +230,6 @@ class Avatar:
             mask = self.mask_list_cycle[self.idx % (len(self.mask_list_cycle))]
             mask_crop_box = self.mask_coords_list_cycle[self.idx % (len(self.mask_coords_list_cycle))]
             combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
-            STREAM_QUEUE.put(combine_frame)
 
             if skip_save_images is False:
                 cv2.imwrite(f"{self.avatar_path}/tmp/{str(self.idx).zfill(8)}.png", combine_frame)
@@ -424,128 +407,3 @@ if __name__ == "__main__":
                            audio_num,
                            args.fps,
                            args.skip_save_images)
-
-
-
-def initialize_models():
-
-    global vae
-    global unet
-    global pe
-    global whisper
-    global audio_processor
-    global fp
-    global device
-    global timesteps
-    global args
-    global weight_dtype
-
-    print("[INIT] Loading MuseTalk models...")
-
-    args = SimpleNamespace(
-        version="v15",
-        ffmpeg_path="./ffmpeg-4.4-amd64-static/",
-        gpu_id=0,
-        vae_type="sd-vae",
-        unet_config="./models/musetalkV15/musetalk.json",
-        unet_model_path="./models/musetalkV15/unet.pth",
-        whisper_dir="./models/whisper",
-        inference_config="configs/inference/realtime.yaml",
-        bbox_shift=0,
-        result_dir="./results",
-        extra_margin=10,
-        fps=25,
-        audio_padding_length_left=2,
-        audio_padding_length_right=2,
-        batch_size=20,
-        output_vid_name=None,
-        use_saved_coord=False,
-        saved_coord=False,
-        parsing_mode="jaw",
-        left_cheek_width=90,
-        right_cheek_width=90,
-        skip_save_images=True
-    )
-
-    device = torch.device(
-        f"cuda:{args.gpu_id}"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    print(f"[INIT] Device: {device}")
-
-    vae, unet, pe = load_all_model(
-        unet_model_path=args.unet_model_path,
-        vae_type=args.vae_type,
-        unet_config=args.unet_config,
-        device=device
-    )
-
-    timesteps = torch.tensor(
-        [0],
-        device=device
-    )
-
-    pe = pe.half().to(device)
-    vae.vae = vae.vae.half().to(device)
-    unet.model = unet.model.half().to(device)
-
-    audio_processor = AudioProcessor(
-        feature_extractor_path=args.whisper_dir
-    )
-
-    weight_dtype = unet.model.dtype
-
-    print(
-        f"[INIT] weight_dtype={weight_dtype}"
-    )
-
-    whisper = WhisperModel.from_pretrained(
-        args.whisper_dir
-    )
-
-    whisper = whisper.to(
-        device=device,
-        dtype=weight_dtype
-    ).eval()
-
-    whisper.requires_grad_(False)
-
-    fp = FaceParsing(
-        left_cheek_width=args.left_cheek_width,
-        right_cheek_width=args.right_cheek_width
-    )
-
-    print("[INIT] Models Loaded Successfully")
-
-
-def create_avatar():
-
-    global args
-
-    inference_config = OmegaConf.load(
-        args.inference_config
-    )
-
-    avatar_id = list(
-        inference_config.keys()
-    )[0]
-
-    avatar_cfg = inference_config[
-        avatar_id
-    ]
-
-    avatar = Avatar(
-        avatar_id=avatar_id,
-        video_path=avatar_cfg["video_path"],
-        bbox_shift=0,
-        batch_size=args.batch_size,
-        preparation=False
-    )
-
-    print(
-        f"[AVATAR] Loaded: {avatar_id}"
-    )
-
-    return avatar                         
