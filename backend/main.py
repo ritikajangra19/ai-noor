@@ -333,8 +333,14 @@ async def websocket_chat(websocket: WebSocket):
                     "audio": f"data:audio/mp3;base64,{cd['audio_b64']}",
                     "total_frames": video_num
                 }))
-
-                gen = datagen(cd["whisper_chunks"], models["input_latent_list_cycle"], 16)
+                
+                batch_size = 32
+                gen = datagen(
+                    cd["whisper_chunks"],
+                    models["input_latent_list_cycle"],
+                    batch_size
+                )
+                
                 frame_idx = 0
 
                 for whisper_batch, latent_batch in gen:
@@ -371,11 +377,14 @@ async def websocket_chat(websocket: WebSocket):
                         }))
 
                         if frame_idx % 25 == 0 or frame_idx == video_num - 1:
-                            print(f"[WS] Chunk {chunk_idx}: sent frame {frame_idx + 1}/{video_num}")
-
-                        await asyncio.sleep(0)
+                            print(f"[WS] Chunk {chunk_idx}: Sent frame {frame_idx + 1}/{video_num}")
+                            
                         frame_idx += 1
 
+                    # Yield once per batch to let the event loop process network packets
+                    await asyncio.sleep(0)
+                
+                # Signal end of this chunk
                 await websocket.send_text(json.dumps({
                     "type": "chunk_end",
                     "session_id": session_id,
