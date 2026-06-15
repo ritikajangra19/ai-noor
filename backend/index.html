@@ -733,7 +733,7 @@
                             targetChunk.receivedFrames++;
                             
                             // Render first frame immediately to lock pose
-                            if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
+                            if (msg.chunk_index === 0 && msg.index === 0) {
                                 if (img.complete && img.naturalWidth !== 0) {
                                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                                 }
@@ -819,36 +819,21 @@
             const frameIndex = Math.floor(currentTime * 25);
 
             if (frameIndex < chunk.totalFrames) {
-                const hasFrame = !!chunk.frames[frameIndex];
-                
-                if (chunk.isBuffering) {
-                    // Only resume if we have a healthy cushion (8 frames) or the chunk is complete
-                    const bufferCushion = chunk.receivedFrames - frameIndex;
-                    const isHealthy = bufferCushion >= 8 || chunk.isReady;
-                    
-                    if (hasFrame && isHealthy) {
-                        chunk.isBuffering = false;
-                        updateStatus("speaking");
-                        globalAudioPlayer.play().catch(e => {});
-                    }
-                }
+                const img = chunk.frames[frameIndex];
 
-                if (hasFrame && !chunk.isBuffering) {
-                    const img = chunk.frames[frameIndex];
-                    if (img.complete && img.naturalWidth !== 0) {
-                        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-                            canvas.width = img.naturalWidth;
-                            canvas.height = img.naturalHeight;
-                        }
-                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                if (img && img.complete && img.naturalWidth !== 0) {
+                    // Frame is ready — draw it and remember it
+                    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+                        canvas.width = img.naturalWidth;
+                        canvas.height = img.naturalHeight;
                     }
-                } else {
-                    // Frame is NOT available or we are still buffering! Pause and wait for cushion
-                    if (!chunk.isBuffering) {
-                        chunk.isBuffering = true;
-                        updateStatus("idle"); // Show breathing animation seamlessly
-                        globalAudioPlayer.pause();
-                    }
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    chunk.lastRenderedImg = img;
+                } else if (chunk.lastRenderedImg) {
+                    // Frame not yet delivered by GPU — hold last good frame.
+                    // Audio keeps playing: a brief frozen face is far less jarring
+                    // than silence breaks in speech.
+                    ctx.drawImage(chunk.lastRenderedImg, 0, 0, canvas.width, canvas.height);
                 }
             }
 
