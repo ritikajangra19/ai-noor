@@ -770,8 +770,8 @@
             if (playbackQueue.length > 0) {
                 const nextChunk = playbackQueue[0];
                 
-                // Start playing if the chunk is ready, or we have accumulated 40 frames (~1.6s buffer)
-                if (nextChunk.isReady || nextChunk.receivedFrames >= 40) {
+                // Start playing if the chunk is ready, or we have accumulated 20 frames (~0.8s buffer)
+                if (nextChunk.isReady || nextChunk.receivedFrames >= 20) {
                     currentPlayingChunk = playbackQueue.shift(); // Remove from queue
                     
                     // Hide the typing indicator as soon as the first chunk starts playing
@@ -822,9 +822,9 @@
                 const hasFrame = !!chunk.frames[frameIndex];
                 
                 if (chunk.isBuffering) {
-                    // Only resume if we have a healthy cushion (20 frames) or the chunk is complete
+                    // Only resume if we have a healthy cushion (8 frames) or the chunk is complete
                     const bufferCushion = chunk.receivedFrames - frameIndex;
-                    const isHealthy = bufferCushion >= 20 || chunk.isReady;
+                    const isHealthy = bufferCushion >= 8 || chunk.isReady;
                     
                     if (hasFrame && isHealthy) {
                         chunk.isBuffering = false;
