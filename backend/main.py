@@ -242,131 +242,132 @@ def portal_resolver():
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket client connected.")
-    
+
     try:
         while True:
             data = await websocket.receive_text()
             print(f"[WS] Received message payload: {data}")
             message = json.loads(data)
-            print(f"message: {message}")
             user_text = message.get("text", "")
             session_id = message.get("session_id", "")
             is_elevenlabs = message.get("elevenlabs", False)
-            print(f"[WS] Decoded message - User text: '{user_text}', Session ID: '{session_id}', Elevenlabs: '{is_elevenlabs}' ")
-            
+            print(f"[WS] User text: '{user_text}', Session: '{session_id}', ElevenLabs: {is_elevenlabs}")
+
             sentences = [user_text] if is_elevenlabs else split_into_sentences(user_text)
-            print(f"Secntence: '{sentences}'")
             if not sentences:
                 sentences = [user_text]
-            
-            for chunk_idx, sentence in enumerate(sentences):
-                print(f"[WS] Processing chunk {chunk_idx+1}/{len(sentences)}: '{sentence}'")
-                
+            print(f"[WS] Sentences ({len(sentences)}): {sentences}")
+
+            # ── Step 1: Generate ALL TTS audio files concurrently ──────────────────
+            # Edge-TTS is a pure network call with no GPU involvement, so all
+            # sentences can be synthesized in parallel. This eliminates the serial
+            # TTS wait that previously caused a silent gap between each chunk.
+            async def gen_tts(sentence):
                 if is_elevenlabs:
-                    audio_path = "data/audio/11lab-audio-noor.mp3"
-                    response_text = "Playing pre-saved ElevenLabs audio demo."
-                    print(f"[WS] ElevenLabs mode selected. Using pre-saved audio: {audio_path}")
-                    if not os.path.exists(audio_path):
-                        assets_audio = "assets/11lab-audio-noor.mp3"
-                        print(f"[WS] Pre-saved audio not found. Copying from {assets_audio}...")
-                        if os.path.exists(assets_audio):
-                            os.makedirs("data/audio", exist_ok=True)
+                    path = "data/audio/11lab-audio-noor.mp3"
+                    if not os.path.exists(path):
+                        src = "assets/11lab-audio-noor.mp3"
+                        if os.path.exists(src):
                             import shutil
-                            shutil.copy(assets_audio, audio_path)
-                else:
-                    response_text = sentence
-                    audio_filename = f"tts_{uuid.uuid4().hex}.mp3"
-                    audio_path = os.path.join(UPLOAD_DIR, audio_filename)
-                    
-                    tts_text = response_text.replace("species", "spee-sheez")
-                    print(f"[WS] Edge-TTS generating chunk {chunk_idx}: '{tts_text}'")
-                    communicate = edge_tts.Communicate(tts_text, "en-US-JennyNeural")
-                    await communicate.save(audio_path)
-                    print(f"[WS] Chunk {chunk_idx} Edge-TTS audio generated successfully.")
-                
-                # Extract Whisper features
-                print(f"[WS] Extracting Whisper features for chunk {chunk_idx}...")
-                audio_processor = models["audio_processor"]
-                device = models["device"]
-                weight_dtype = models["weight_dtype"]
-                whisper = models["whisper"]
-                pe = models["pe"]
-                unet = models["unet"]
-                vae = models["vae"]
-                timesteps = models["timesteps"]
-                
-                whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
-                whisper_chunks = audio_processor.get_whisper_chunk(
-                    whisper_input_features,
-                    device,
-                    weight_dtype,
-                    whisper,
-                    librosa_length,
-                    fps=25,
-                    audio_padding_length_left=2,
-                    audio_padding_length_right=2
+                            os.makedirs("data/audio", exist_ok=True)
+                            shutil.copy(src, path)
+                    return path, "Playing pre-saved ElevenLabs audio demo."
+                fname = f"tts_{uuid.uuid4().hex}.mp3"
+                path = os.path.join(UPLOAD_DIR, fname)
+                tts_text = sentence.replace("species", "spee-sheez")
+                communicate = edge_tts.Communicate(tts_text, "en-US-JennyNeural")
+                await communicate.save(path)
+                return path, sentence
+
+            print(f"[WS] Generating TTS for {len(sentences)} sentence(s) concurrently...")
+            tts_results = await asyncio.gather(*[gen_tts(s) for s in sentences])
+            print("[WS] All TTS audio ready.")
+
+            # ── Step 2: Pre-compute Whisper features for ALL chunks (GPU, sequential)
+            # Done upfront so there is zero Whisper latency between chunks during
+            # streaming — when chunk N finishes, chunk N+1 inference starts instantly.
+            audio_processor        = models["audio_processor"]
+            device                 = models["device"]
+            weight_dtype           = models["weight_dtype"]
+            whisper                = models["whisper"]
+            pe                     = models["pe"]
+            unet                   = models["unet"]
+            vae                    = models["vae"]
+            timesteps              = models["timesteps"]
+            coord_list_cycle       = models["coord_list_cycle"]
+            frame_list_cycle       = models["frame_list_cycle"]
+            mask_list_cycle        = models["mask_list_cycle"]
+            mask_coords_list_cycle = models["mask_coords_list_cycle"]
+
+            all_chunk_data = []
+            for chunk_idx, (audio_path, response_text) in enumerate(tts_results):
+                print(f"[WS] Whisper pre-compute for chunk {chunk_idx}...")
+                wif, lib_len = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
+                wchunks = audio_processor.get_whisper_chunk(
+                    wif, device, weight_dtype, whisper, lib_len,
+                    fps=25, audio_padding_length_left=2, audio_padding_length_right=2
                 )
-                
-                video_num = len(whisper_chunks)
-                print(f"[WS] Whisper feature extraction complete. Total chunks/frames: {video_num}")
-                
-                # Load audio bytes to base64
                 with open(audio_path, "rb") as f:
-                    audio_bytes = f.read()
-                    audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
-                    
-                # Send chunk_start metadata
+                    audio_b64 = base64.b64encode(f.read()).decode("utf-8")
+                all_chunk_data.append({
+                    "response_text": response_text,
+                    "whisper_chunks": wchunks,
+                    "audio_b64": audio_b64,
+                    "video_num": len(wchunks),
+                })
+                await asyncio.sleep(0)
+            print(f"[WS] Whisper pre-compute done for all {len(all_chunk_data)} chunk(s).")
+
+            # ── Step 3: Stream inference frames for all chunks back-to-back ─────────
+            # Because TTS and Whisper are already done, the backend transitions from
+            # chunk N to chunk N+1 with zero additional blocking — no inter-chunk gap.
+            for chunk_idx, cd in enumerate(all_chunk_data):
+                video_num = cd["video_num"]
+                print(f"[WS] Streaming chunk {chunk_idx}: {video_num} frames | '{cd['response_text'][:50]}'")
+
                 await websocket.send_text(json.dumps({
                     "type": "chunk_start",
                     "session_id": session_id,
                     "chunk_index": chunk_idx,
-                    "text": response_text,
-                    "audio": f"data:audio/mp3;base64,{audio_base64}",
+                    "text": cd["response_text"],
+                    "audio": f"data:audio/mp3;base64,{cd['audio_b64']}",
                     "total_frames": video_num
                 }))
                 
                 batch_size = 32
                 gen = datagen(
-                    whisper_chunks,
+                    cd["whisper_chunks"],
                     models["input_latent_list_cycle"],
                     batch_size
                 )
                 
                 frame_idx = 0
-                coord_list_cycle = models["coord_list_cycle"]
-                frame_list_cycle = models["frame_list_cycle"]
-                mask_list_cycle = models["mask_list_cycle"]
-                mask_coords_list_cycle = models["mask_coords_list_cycle"]
-                
-                print(f"[WS] Starting MuseTalk inference for chunk {chunk_idx}...")
+
                 for whisper_batch, latent_batch in gen:
                     audio_feature_batch = pe(whisper_batch.to(device))
                     latent_batch = latent_batch.to(device=device, dtype=unet.model.dtype)
-                    
                     pred_latents = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feature_batch).sample
                     pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
                     recon = vae.decode_latents(pred_latents)
-                    
+
                     for res_frame in recon:
-                        bbox = coord_list_cycle[frame_idx % (len(coord_list_cycle))]
-                        ori_frame = copy.deepcopy(frame_list_cycle[frame_idx % (len(frame_list_cycle))])
+                        bbox      = coord_list_cycle[frame_idx % len(coord_list_cycle)]
+                        ori_frame = copy.deepcopy(frame_list_cycle[frame_idx % len(frame_list_cycle)])
                         x1, y1, x2, y2 = bbox
-                        
                         try:
                             res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
                         except Exception as e:
                             print(f"[WS] Warning: Failed to resize frame {frame_idx}: {e}")
                             frame_idx += 1
                             continue
-                            
-                        mask = mask_list_cycle[frame_idx % (len(mask_list_cycle))]
-                        mask_crop_box = mask_coords_list_cycle[frame_idx % (len(mask_coords_list_cycle))]
-                        
+
+                        mask          = mask_list_cycle[frame_idx % len(mask_list_cycle)]
+                        mask_crop_box = mask_coords_list_cycle[frame_idx % len(mask_coords_list_cycle)]
                         combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-                        
+
                         _, buffer = cv2.imencode('.jpg', combine_frame)
                         frame_base64 = base64.b64encode(buffer).decode("utf-8")
-                        
+
                         await websocket.send_text(json.dumps({
                             "type": "frame",
                             "session_id": session_id,
@@ -374,12 +375,12 @@ async def websocket_chat(websocket: WebSocket):
                             "index": frame_idx,
                             "image": f"data:image/jpeg;base64,{frame_base64}"
                         }))
-                        
+
                         if frame_idx % 25 == 0 or frame_idx == video_num - 1:
                             print(f"[WS] Chunk {chunk_idx}: Sent frame {frame_idx + 1}/{video_num}")
                             
                         frame_idx += 1
-                    
+
                     # Yield once per batch to let the event loop process network packets
                     await asyncio.sleep(0)
                 
@@ -391,10 +392,9 @@ async def websocket_chat(websocket: WebSocket):
                 }))
                 print(f"[WS] Finished streaming chunk {chunk_idx}.")
 
-            # Send global end signal after all chunks are processed
             await websocket.send_text(json.dumps({"type": "end", "session_id": session_id}))
             print("[WS] Sent global end signal to client.")
-            
+
     except WebSocketDisconnect:
         print("WebSocket client disconnected.")
     except Exception as e:
