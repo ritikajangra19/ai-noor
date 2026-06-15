@@ -325,7 +325,7 @@ async def websocket_chat(websocket: WebSocket):
                     "total_frames": video_num
                 }))
                 
-                batch_size = 16
+                batch_size = 32
                 gen = datagen(
                     whisper_chunks,
                     models["input_latent_list_cycle"],
@@ -378,8 +378,10 @@ async def websocket_chat(websocket: WebSocket):
                         if frame_idx % 25 == 0 or frame_idx == video_num - 1:
                             print(f"[WS] Chunk {chunk_idx}: Sent frame {frame_idx + 1}/{video_num}")
                             
-                        await asyncio.sleep(0)
                         frame_idx += 1
+                    
+                    # Yield once per batch to let the event loop process network packets
+                    await asyncio.sleep(0)
                 
                 # Signal end of this chunk
                 await websocket.send_text(json.dumps({
