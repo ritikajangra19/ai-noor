@@ -66,18 +66,18 @@ def split_into_sentences(text: str) -> list[str]:
                 continue
                 
             # 4. Hard-split by word boundaries to enforce max chunk size of ~120 chars
-            words = clause.split()
-            current_chunk = []
-            current_len = 0
-            for w in words:
-                current_chunk.append(w)
-                current_len += len(w) + 1
-                if current_len >= 120:
-                    sub_chunks.append(" ".join(current_chunk))
-                    current_chunk = []
-                    current_len = 0
-            if current_chunk:
-                sub_chunks.append(" ".join(current_chunk))
+            # words = clause.split()
+            # current_chunk = []
+            # current_len = 0
+            # for w in words:
+            #     current_chunk.append(w)
+            #     current_len += len(w) + 1
+            #     if current_len >= 120:
+            #         sub_chunks.append(" ".join(current_chunk))
+            #         current_chunk = []
+            #         current_len = 0
+            # if current_chunk:
+            #     sub_chunks.append(" ".join(current_chunk))
 
     # 5. Group very short adjacent chunks together for smooth natural speech flow
     combined = []
@@ -248,15 +248,17 @@ async def websocket_chat(websocket: WebSocket):
             data = await websocket.receive_text()
             print(f"[WS] Received message payload: {data}")
             message = json.loads(data)
+            print(f"message: {message}")
             user_text = message.get("text", "")
             session_id = message.get("session_id", "")
             is_elevenlabs = message.get("elevenlabs", False)
-            print(f"[WS] Decoded message - User text: '{user_text}', Session ID: '{session_id}'")
+            print(f"[WS] Decoded message - User text: '{user_text}', Session ID: '{session_id}', Elevenlabs: '{is_elevenlabs}' ")
             
             sentences = [user_text] if is_elevenlabs else split_into_sentences(user_text)
+            print(f"Secntence: '{sentences}'")
             if not sentences:
                 sentences = [user_text]
-                
+            
             for chunk_idx, sentence in enumerate(sentences):
                 print(f"[WS] Processing chunk {chunk_idx+1}/{len(sentences)}: '{sentence}'")
                 

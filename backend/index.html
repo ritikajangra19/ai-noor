@@ -485,6 +485,18 @@
     </div>
 
     <main>
+
+        <!-- Right Column: Avatar WebRTC Display -->
+        <section class="glass-panel avatar-container">
+            <div class="avatar-box">
+                <canvas id="avatarCanvas" width="256" height="256"></canvas>
+                <div class="avatar-overlay">
+                    <div class="dot"></div>
+                    <span id="avatarOverlayText">Noor (Idle)</span>
+                </div>
+            </div>
+        </section>
+
         <!-- Left Column: Chat log -->
         <section class="glass-panel chat-container">
             <div class="chat-header">
@@ -523,16 +535,7 @@
             </div>
         </section>
 
-        <!-- Right Column: Avatar WebRTC Display -->
-        <section class="glass-panel avatar-container">
-            <div class="avatar-box">
-                <canvas id="avatarCanvas" width="256" height="256"></canvas>
-                <div class="avatar-overlay">
-                    <div class="dot"></div>
-                    <span id="avatarOverlayText">Noor (Idle)</span>
-                </div>
-            </div>
-        </section>
+        
     </main>
 
     <script>
