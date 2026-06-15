@@ -318,29 +318,22 @@ async def websocket_chat(websocket: WebSocket):
                 await asyncio.sleep(0)
             print(f"[WS] Whisper pre-compute done for all {len(all_chunk_data)} chunk(s).")
 
-            # ── Step 3: Stream inference frames for all chunks back-to-back ─────────
-            # Because TTS and Whisper are already done, the backend transitions from
-            # chunk N to chunk N+1 with zero additional blocking — no inter-chunk gap.
+            # ── Step 3: Generate ALL frames first, then send to frontend ────────────
+            # Inference runs completely before any network send so the frontend
+            # receives a fully-ready chunk with no mid-stream buffering stalls.
             for chunk_idx, cd in enumerate(all_chunk_data):
                 video_num = cd["video_num"]
-                print(f"[WS] Streaming chunk {chunk_idx}: {video_num} frames | '{cd['response_text'][:50]}'")
+                print(f"[WS] Generating all frames for chunk {chunk_idx}: {video_num} frames | '{cd['response_text'][:50]}'")
 
-                await websocket.send_text(json.dumps({
-                    "type": "chunk_start",
-                    "session_id": session_id,
-                    "chunk_index": chunk_idx,
-                    "text": cd["response_text"],
-                    "audio": f"data:audio/mp3;base64,{cd['audio_b64']}",
-                    "total_frames": video_num
-                }))
-                
                 batch_size = 32
                 gen = datagen(
                     cd["whisper_chunks"],
                     models["input_latent_list_cycle"],
                     batch_size
                 )
-                
+
+                # Collect every encoded frame before touching the WebSocket
+                all_frames = []
                 frame_idx = 0
 
                 for whisper_batch, latent_batch in gen:
@@ -366,31 +359,41 @@ async def websocket_chat(websocket: WebSocket):
                         combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
 
                         _, buffer = cv2.imencode('.jpg', combine_frame)
-                        frame_base64 = base64.b64encode(buffer).decode("utf-8")
-
-                        await websocket.send_text(json.dumps({
-                            "type": "frame",
-                            "session_id": session_id,
-                            "chunk_index": chunk_idx,
-                            "index": frame_idx,
-                            "image": f"data:image/jpeg;base64,{frame_base64}"
-                        }))
-
-                        if frame_idx % 25 == 0 or frame_idx == video_num - 1:
-                            print(f"[WS] Chunk {chunk_idx}: Sent frame {frame_idx + 1}/{video_num}")
-                            
+                        all_frames.append(base64.b64encode(buffer).decode("utf-8"))
                         frame_idx += 1
 
-                    # Yield once per batch to let the event loop process network packets
+                print(f"[WS] Chunk {chunk_idx}: {len(all_frames)} frames ready. Sending to client...")
+
+                # Send chunk_start now that we know the exact frame count
+                await websocket.send_text(json.dumps({
+                    "type": "chunk_start",
+                    "session_id": session_id,
+                    "chunk_index": chunk_idx,
+                    "text": cd["response_text"],
+                    "audio": f"data:audio/mp3;base64,{cd['audio_b64']}",
+                    "total_frames": len(all_frames)
+                }))
+
+                # Send all pre-generated frames back-to-back
+                for i, frame_base64 in enumerate(all_frames):
+                    await websocket.send_text(json.dumps({
+                        "type": "frame",
+                        "session_id": session_id,
+                        "chunk_index": chunk_idx,
+                        "index": i,
+                        "image": f"data:image/jpeg;base64,{frame_base64}"
+                    }))
+                    if i % 25 == 0 or i == len(all_frames) - 1:
+                        print(f"[WS] Chunk {chunk_idx}: Sent frame {i + 1}/{len(all_frames)}")
                     await asyncio.sleep(0)
-                
+
                 # Signal end of this chunk
                 await websocket.send_text(json.dumps({
                     "type": "chunk_end",
                     "session_id": session_id,
                     "chunk_index": chunk_idx
                 }))
-                print(f"[WS] Finished streaming chunk {chunk_idx}.")
+                print(f"[WS] Finished chunk {chunk_idx}.")
 
             await websocket.send_text(json.dumps({"type": "end", "session_id": session_id}))
             print("[WS] Sent global end signal to client.")
