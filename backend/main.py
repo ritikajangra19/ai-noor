@@ -325,7 +325,7 @@ async def websocket_chat(websocket: WebSocket):
                     "total_frames": video_num
                 }))
                 
-                batch_size = 16
+                batch_size = 32
                 gen = datagen(
                     whisper_chunks,
                     models["input_latent_list_cycle"],
