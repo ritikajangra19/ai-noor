@@ -727,20 +727,22 @@
                                       : playbackQueue.find(c => c.index === msg.chunk_index);
 
                     if (targetChunk) {
-                        const img = new Image();
-                        img.onload = () => {
-                            targetChunk.frames[msg.index] = img;
-                            targetChunk.receivedFrames++;
-                            
-                            // Render first frame immediately to lock pose
-                            if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
-                                if (img.complete && img.naturalWidth !== 0) {
-                                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        fetch(msg.image)
+                            .then(res => res.blob())
+                            .then(blob => createImageBitmap(blob))
+                            .then(bitmap => {
+                                targetChunk.frames[msg.index] = bitmap;
+                                targetChunk.receivedFrames++;
+                                
+                                // Render first frame immediately to lock pose
+                                if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
+                                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
                                 }
-                            }
-                            checkQueue();
-                        };
-                        img.src = msg.image;
+                                checkQueue();
+                            })
+                            .catch(err => {
+                                console.error("Error decoding frame:", err);
+                            });
                     }
 
                 } else if (msg.type === "chunk_end") {
@@ -770,8 +772,8 @@
             if (playbackQueue.length > 0) {
                 const nextChunk = playbackQueue[0];
                 
-                // Start playing if the chunk is ready, or we have accumulated 40 frames (~1.6s buffer)
-                if (nextChunk.isReady || nextChunk.receivedFrames >= 40) {
+                // Start playing if the chunk is ready, or we have accumulated 10 frames (~0.4s buffer)
+                if (nextChunk.isReady || nextChunk.receivedFrames >= 10) {
                     currentPlayingChunk = playbackQueue.shift(); // Remove from queue
                     
                     // Hide the typing indicator as soon as the first chunk starts playing
@@ -822,9 +824,9 @@
                 const hasFrame = !!chunk.frames[frameIndex];
                 
                 if (chunk.isBuffering) {
-                    // Only resume if we have a healthy cushion (20 frames) or the chunk is complete
+                    // Only resume if we have a healthy cushion (10 frames) or the chunk is complete
                     const bufferCushion = chunk.receivedFrames - frameIndex;
-                    const isHealthy = bufferCushion >= 20 || chunk.isReady;
+                    const isHealthy = bufferCushion >= 10 || chunk.isReady;
                     
                     if (hasFrame && isHealthy) {
                         chunk.isBuffering = false;
@@ -835,10 +837,12 @@
 
                 if (hasFrame && !chunk.isBuffering) {
                     const img = chunk.frames[frameIndex];
-                    if (img.complete && img.naturalWidth !== 0) {
-                        if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-                            canvas.width = img.naturalWidth;
-                            canvas.height = img.naturalHeight;
+                    if (img) {
+                        const w = img.naturalWidth || img.width;
+                        const h = img.naturalHeight || img.height;
+                        if (canvas.width !== w || canvas.height !== h) {
+                            canvas.width = w;
+                            canvas.height = h;
                         }
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     }
@@ -878,7 +882,7 @@
         function loadIdleFrames() {
             idleFrames = [];
             const START_FRAME = 125; // 5th second (5 * 25 FPS)
-            const END_FRAME = 375;   // 15th second (15 * 25 FPS)
+            const END_FRAME = 175;   // 7th second (only 50 frames to reduce startup load)
             for (let i = START_FRAME; i < END_FRAME; i++) {
                 const img = new Image();
                 const frameNum = String(i).padStart(8, '0');
