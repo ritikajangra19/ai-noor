@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import time
 import threading
 import copy
 import pickle
@@ -280,8 +281,9 @@ async def websocket_chat(websocket: WebSocket):
                 return path, sentence
 
             print(f"[WS] Generating TTS for {len(sentences)} sentence(s) concurrently...")
+            tts_start = time.time()
             tts_results = await asyncio.gather(*[gen_tts(s) for s in sentences])
-            print("[WS] All TTS audio ready.")
+            print(f"[WS] All TTS audio ready in {time.time() - tts_start:.2f} seconds.")
 
             # ── Step 2: Pre-compute Whisper features for ALL chunks (GPU, sequential)
             # Done upfront so there is zero Whisper latency between chunks during
@@ -299,6 +301,7 @@ async def websocket_chat(websocket: WebSocket):
             mask_list_cycle        = models["mask_list_cycle"]
             mask_coords_list_cycle = models["mask_coords_list_cycle"]
 
+            whisper_start = time.time()
             all_chunk_data = []
             for chunk_idx, (audio_path, response_text) in enumerate(tts_results):
                 print(f"[WS] Whisper pre-compute for chunk {chunk_idx}...")
@@ -316,7 +319,7 @@ async def websocket_chat(websocket: WebSocket):
                     "video_num": len(wchunks),
                 })
                 await asyncio.sleep(0)
-            print(f"[WS] Whisper pre-compute done for all {len(all_chunk_data)} chunk(s).")
+            print(f"[WS] Whisper pre-compute done for all {len(all_chunk_data)} chunk(s) in {time.time() - whisper_start:.2f} seconds.")
 
             # ── Step 3: Stream inference frames for all chunks back-to-back ─────────
             # Because TTS and Whisper are already done, the backend transitions from
@@ -344,12 +347,15 @@ async def websocket_chat(websocket: WebSocket):
                 frame_idx = 0
 
                 for whisper_batch, latent_batch in gen:
+                    batch_start = time.time()
                     audio_feature_batch = pe(whisper_batch.to(device))
                     latent_batch = latent_batch.to(device=device, dtype=unet.model.dtype)
                     pred_latents = unet.model(latent_batch, timesteps, encoder_hidden_states=audio_feature_batch).sample
                     pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
                     recon = vae.decode_latents(pred_latents)
+                    gpu_time = time.time() - batch_start
 
+                    post_start = time.time()
                     for res_frame in recon:
                         bbox      = coord_list_cycle[frame_idx % len(coord_list_cycle)]
                         ori_frame = copy.deepcopy(frame_list_cycle[frame_idx % len(frame_list_cycle)])
@@ -381,6 +387,10 @@ async def websocket_chat(websocket: WebSocket):
                             
                         frame_idx += 1
                         await asyncio.sleep(0.001)
+                    
+                    post_time = time.time() - post_start
+                    total_time = time.time() - batch_start
+                    print(f"[DEBUG] Batch {frame_idx//batch_size}: GPU={gpu_time*1000:.1f}ms | Post & WS Send={post_time*1000:.1f}ms | Total={total_time*1000:.1f}ms")
 
                     # Yield once per batch to let the event loop process network packets
                     await asyncio.sleep(0)

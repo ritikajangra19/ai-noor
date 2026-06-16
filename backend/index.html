@@ -735,8 +735,11 @@
                                 targetChunk.receivedFrames++;
                                 
                                 // Render first frame immediately to lock pose
-                                if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
-                                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                                if (msg.chunk_index === 0 && msg.index === 0) {
+                                    console.timeEnd("ResponseStartToFirstFrame");
+                                    if (currentStatusState === "buffering") {
+                                        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                                    }
                                 }
                                 checkQueue();
                             })
@@ -777,8 +780,9 @@
                     currentPlayingChunk = playbackQueue.shift(); // Remove from queue
                     
                     // Hide the typing indicator as soon as the first chunk starts playing
-                    if (nextChunk.index === 0) {
+                    if (currentPlayingChunk.index === 0) {
                         typingIndicator.style.display = "none";
+                        console.timeEnd("ResponseStartToPlay");
                     }
                     
                     playChunk(currentPlayingChunk);
@@ -788,6 +792,7 @@
 
         function playChunk(chunk) {
             updateStatus("speaking");
+            console.log(`[PLAYBACK] Starting playback of Chunk ${chunk.index} (${chunk.totalFrames} frames)`);
             
             globalAudioPlayer.src = chunk.audioSrc;
             
@@ -852,6 +857,7 @@
                         chunk.isBuffering = true;
                         updateStatus("idle"); // Show breathing animation seamlessly
                         globalAudioPlayer.pause();
+                        console.warn(`[LAG DETECTED] Playback paused at frame ${frameIndex} (Cushion size: ${chunk.receivedFrames - frameIndex} frames)`);
                     }
                 }
             }
@@ -935,6 +941,10 @@
                 messageInput.value = "";
                 typingIndicator.style.display = "flex";
                 updateStatus("thinking");
+                
+                console.time("ResponseStartToFirstFrame");
+                console.time("ResponseStartToPlay");
+                
                 ws.send(JSON.stringify({ text: text, session_id: currentSessionId }));
             } else {
                 addMessage("noor", "Error: Server connection offline. Cannot send message.");
