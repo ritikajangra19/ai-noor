@@ -281,13 +281,13 @@ async def startup_event():
 # Static endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    try:
-        with open("backend/index.html", "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception as e:
-        return f"<h3>index.html not found: {e}</h3>"
+# @app.get("/", response_class=HTMLResponse)
+# def index():
+#     try:
+#         with open("backend/index.html", "r", encoding="utf-8") as f:
+#             return f.read()
+#     except Exception as e:
+#         return f"<h3>index.html not found: {e}</h3>"
 
 
 @app.get("/portal-resolver")
