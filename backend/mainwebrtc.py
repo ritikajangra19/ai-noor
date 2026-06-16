@@ -48,6 +48,51 @@ from transformers                import WhisperModel
 
 import re
 
+# ---------------------------------------------------------------------------
+# TURN relay configuration — set these env vars before starting the server.
+# Without a TURN server WebRTC will fail when both peers are behind NAT.
+#
+#   TURN_URLS       comma-separated list, e.g.
+#                     "turn:a.relay.metered.ca:80,turns:a.relay.metered.ca:443"
+#   TURN_USERNAME   credential username from your TURN provider
+#   TURN_CREDENTIAL credential password / secret
+#
+# Free options (for testing):
+#   • https://www.metered.ca/tools/openrelay/ — no sign-up required
+#       TURN_URLS="turn:openrelay.metered.ca:80,turns:openrelay.metered.ca:443"
+#       TURN_USERNAME="openrelayproject"
+#       TURN_CREDENTIAL="openrelayproject"
+#
+# Production: sign up at metered.ca, Twilio NTS, or self-host coturn.
+# ---------------------------------------------------------------------------
+TURN_URLS_RAW   = os.environ.get("TURN_URLS",       "")
+TURN_USERNAME   = os.environ.get("TURN_USERNAME",   "")
+TURN_CREDENTIAL = os.environ.get("TURN_CREDENTIAL", "")
+
+
+def _build_ice_servers() -> list:
+    """Assemble RTCIceServer list from env config."""
+    servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
+    if TURN_URLS_RAW and TURN_USERNAME:
+        urls = [u.strip() for u in TURN_URLS_RAW.split(",") if u.strip()]
+        servers.append(RTCIceServer(
+            urls=urls,
+            username=TURN_USERNAME,
+            credential=TURN_CREDENTIAL,
+        ))
+    else:
+        print("[WARN] No TURN_URLS / TURN_USERNAME set — WebRTC will fail through NAT!")
+    return servers
+
+
+def _drain_queue(q: asyncio.Queue) -> None:
+    """Empty a queue without blocking."""
+    while True:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
 
 # ---------------------------------------------------------------------------
 # Text utilities
@@ -144,10 +189,11 @@ class FrameVideoTrack(VideoStreamTrack):
 
 class SessionState:
     def __init__(self, session_id: str):
-        self.session_id:  str                          = session_id
-        self.pc:          Optional[RTCPeerConnection]  = None
-        self.frame_queue: asyncio.Queue                = asyncio.Queue()
-        self.data_channel                              = None   # aiortc DataChannel
+        self.session_id:   str                          = session_id
+        self.pc:           Optional[RTCPeerConnection]  = None
+        self.frame_queue:  asyncio.Queue                = asyncio.Queue()
+        self.data_channel                               = None   # aiortc DataChannel
+        self.generation_id: int                         = 0      # increments per /generate call
 
     def send_control(self, message: dict) -> None:
         """Send a JSON control message to the client via the WebRTC data channel."""
@@ -295,6 +341,23 @@ def portal_resolver():
     return {"status": "ok"}
 
 
+@app.get("/ice-config")
+def ice_config():
+    """
+    Client fetches this before creating RTCPeerConnection so it gets the
+    exact same ICE server list (including TURN credentials) as the server.
+    Never hardcode credentials in HTML — serve them from here.
+    """
+    servers = [{"urls": "stun:stun.l.google.com:19302"}]
+    if TURN_URLS_RAW and TURN_USERNAME:
+        servers.append({
+            "urls":       [u.strip() for u in TURN_URLS_RAW.split(",") if u.strip()],
+            "username":   TURN_USERNAME,
+            "credential": TURN_CREDENTIAL,
+        })
+    return JSONResponse({"iceServers": servers})
+
+
 # ---------------------------------------------------------------------------
 # WebRTC signaling
 # ---------------------------------------------------------------------------
@@ -322,9 +385,7 @@ async def webrtc_offer(request: Request):
     sessions[session_id] = state
 
     pc = RTCPeerConnection(
-        configuration=RTCConfiguration(
-            iceServers=[RTCIceServer(urls="stun:stun.l.google.com:19302")]
-        )
+        configuration=RTCConfiguration(iceServers=_build_ice_servers())
     )
     state.pc = pc
 
@@ -400,10 +461,17 @@ async def webrtc_generate(request: Request):
             detail="Session not found. Establish a WebRTC connection via POST /offer first.",
         )
 
+    state = sessions[session_id]
+    # Increment generation counter — any in-flight task with the old id will exit early
+    state.generation_id += 1
+    gen_id = state.generation_id
+    # Flush stale frames from a previous generation
+    _drain_queue(state.frame_queue)
+
     asyncio.create_task(
-        generate_frames_task(session_id, user_text, is_elevenlabs)
+        generate_frames_task(session_id, user_text, is_elevenlabs, gen_id)
     )
-    return JSONResponse({"status": "generating"})
+    return JSONResponse({"status": "generating", "gen_id": gen_id})
 
 
 # ---------------------------------------------------------------------------
@@ -411,13 +479,16 @@ async def webrtc_generate(request: Request):
 # ---------------------------------------------------------------------------
 
 async def generate_frames_task(
-    session_id: str, user_text: str, is_elevenlabs: bool = False
+    session_id: str, user_text: str, is_elevenlabs: bool = False, gen_id: int = 0
 ) -> None:
     state = sessions.get(session_id)
-    if not state:
+    if not state or state.generation_id != gen_id:
         return
 
-    print(f"[{session_id}] Generation started: '{user_text[:60]}'")
+    def is_cancelled() -> bool:
+        return state.generation_id != gen_id or session_id not in sessions
+
+    print(f"[{session_id}] Generation {gen_id} started: '{user_text[:60]}'")
 
     try:
         # ── Step 1: TTS — all sentences concurrently (pure network I/O) ───────
@@ -482,6 +553,10 @@ async def generate_frames_task(
             })
             await asyncio.sleep(0)   # yield between Whisper calls
         print(f"[{session_id}] Whisper pre-compute done ({len(all_chunk_data)} chunk(s)).")
+
+        if is_cancelled():
+            print(f"[{session_id}] Generation {gen_id} cancelled after TTS/Whisper.")
+            return
 
         # ── Step 3: Inference — push BGR frames directly into the queue ───────
         # FrameVideoTrack.recv() drains this queue at 25 fps via WebRTC.
@@ -550,6 +625,10 @@ async def generate_frames_task(
 
                 # Yield once per batch so the event loop can flush data-channel msgs
                 await asyncio.sleep(0)
+
+                if is_cancelled():
+                    print(f"[{session_id}] Generation {gen_id} cancelled mid-chunk {chunk_idx}.")
+                    return
 
             state.send_control({
                 "type":        "chunk_end",
