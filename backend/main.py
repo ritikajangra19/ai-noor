@@ -334,7 +334,7 @@ async def websocket_chat(websocket: WebSocket):
                     "total_frames": video_num
                 }))
                 
-                batch_size = 32
+                batch_size = 8
                 gen = datagen(
                     cd["whisper_chunks"],
                     models["input_latent_list_cycle"],
@@ -365,7 +365,7 @@ async def websocket_chat(websocket: WebSocket):
                         mask_crop_box = mask_coords_list_cycle[frame_idx % len(mask_coords_list_cycle)]
                         combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
 
-                        _, buffer = cv2.imencode('.jpg', combine_frame)
+                        _, buffer = cv2.imencode('.jpg', combine_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                         frame_base64 = base64.b64encode(buffer).decode("utf-8")
 
                         await websocket.send_text(json.dumps({
@@ -380,6 +380,7 @@ async def websocket_chat(websocket: WebSocket):
                             print(f"[WS] Chunk {chunk_idx}: Sent frame {frame_idx + 1}/{video_num}")
                             
                         frame_idx += 1
+                        await asyncio.sleep(0.001)
 
                     # Yield once per batch to let the event loop process network packets
                     await asyncio.sleep(0)
