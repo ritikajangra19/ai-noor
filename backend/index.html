@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Noor - Live WebSocket Streaming Avatar</title>
+    <title>Noor - Live WebRTC Streaming Avatar</title>
     <link rel="icon" href="data:,">
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -539,412 +539,311 @@
     </main>
 
     <script>
-        const chatMessages = document.getElementById("chatMessages");
-        const messageInput = document.getElementById("messageInput");
+        // ── DOM references ──────────────────────────────────────────────────────
+        const chatMessages    = document.getElementById("chatMessages");
+        const messageInput    = document.getElementById("messageInput");
         const typingIndicator = document.getElementById("typingIndicator");
-        const onlineDot = document.getElementById("onlineDot");
-        const statusText = document.getElementById("statusText");
-        const avatarOverlayText = document.getElementById("avatarOverlayText");
-        const canvas = document.getElementById("avatarCanvas");
-        const ctx = canvas.getContext("2d");
+        const onlineDot       = document.getElementById("onlineDot");
+        const statusText      = document.getElementById("statusText");
+        const avatarOverlay   = document.getElementById("avatarOverlayText");
+        const canvas          = document.getElementById("avatarCanvas");
+        const ctx             = canvas.getContext("2d");
 
-        let ws = null;
-        let playbackQueue = [];
-        let currentPlayingChunk = null;
-        let animationFrameId = null;
-        let currentSessionId = "";
-        
-        // Single global audio element to bypass browser autoplay restrictions
-        const globalAudioPlayer = new Audio();
-        
-        let idleFrames = [];
-        let idleFrameIdx = 0;
-        let idleInterval = null;
-        let currentStatusState = "idle";
+        // ── State ───────────────────────────────────────────────────────────────
+        let pc             = null;   // RTCPeerConnection
+        let dataChannel    = null;   // RTCDataChannel (control + audio)
+        let rtcVideoEl     = null;   // hidden <video> receiving the WebRTC stream
+        let rtcSessionId   = "";     // session ID from /offer response
+        let isRTCStreaming  = false;  // draw from rtcVideoEl instead of idle frames
+        let isGenEnded     = false;  // server sent "end"
+        let audioQueue     = [];     // pending base64 audio chunks
+        let isAudioPlaying = false;
+        let idleFrames     = [];
+        let idleFrameIdx   = 0;
+        let idleInterval   = null;
+        let statusState    = "idle";
 
-        // Helper helper because python uses json.dumps and JS uses JSON.stringify
-        const json = {
-            dumps: JSON.stringify,
-            loads: JSON.parse
-        };
+        const globalAudio  = new Audio();
+        // Silence blob to unlock audio context on first user gesture
+        const SILENCE_SRC  = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA";
 
-        // Determine base HTTP & WS URLs
+        // ── URL helpers ─────────────────────────────────────────────────────────
         function getServerUrl(path) {
-            let customUrl = document.getElementById("serverUrlInput").value.trim();
-            if (customUrl) {
-                if (customUrl.startsWith(':')) {
-                    customUrl = window.location.protocol + "//" + window.location.hostname + customUrl;
-                } else if (!customUrl.startsWith('http://') && !customUrl.startsWith('https://')) {
-                    customUrl = window.location.protocol + "//" + customUrl;
-                }
-                const base = customUrl.endsWith('/') ? customUrl.slice(0, -1) : customUrl;
-                return `${base}${path}`;
-            }
-            return path;
+            const custom = document.getElementById("serverUrlInput").value.trim();
+            if (!custom) return path;
+            let base = custom;
+            if (base.startsWith(":")) base = window.location.protocol + "//" + window.location.hostname + base;
+            else if (!/^https?:\/\//i.test(base)) base = window.location.protocol + "//" + base;
+            return base.replace(/\/$/, "") + path;
         }
 
-        function getWebSocketUrl() {
-            let customUrl = document.getElementById("serverUrlInput").value.trim();
-            if (customUrl) {
-                if (customUrl.startsWith(':')) {
-                    const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                    customUrl = wsProtocol + window.location.hostname + customUrl;
-                } else {
-                    customUrl = customUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-                    if (!customUrl.startsWith('ws://') && !customUrl.startsWith('wss://')) {
-                        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                        customUrl = wsProtocol + customUrl;
-                    }
-                }
-                const base = customUrl.endsWith('/') ? customUrl.slice(0, -1) : customUrl;
-                return `${base}/chat`;
-            }
-            const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-            return `${protocol}${window.location.host}/chat`;
-        }
-
-        function showHttpsWarningIfNeeded() {
-            const warningEl = document.getElementById("httpsWarning");
-            if (!warningEl) return;
-            if (window.location.protocol === "https:") {
-                const wsUrl = getWebSocketUrl();
-                const customUrl = document.getElementById("serverUrlInput").value.trim();
-                if (customUrl && wsUrl.startsWith("ws://")) {
-                    warningEl.style.display = "block";
-                    return;
-                }
-            }
-            warningEl.style.display = "none";
-        }
-
-        // Update status indicators
+        // ── Status badge ────────────────────────────────────────────────────────
         function updateStatus(state) {
-            currentStatusState = state;
-            if (state === "idle") {
-                onlineDot.style.backgroundColor = "#10b981"; // green
-                onlineDot.className = "status-dot";
-                statusText.innerText = "Connected";
-                avatarOverlayText.innerText = "Noor (Idle)";
-            } else if (state === "thinking") {
-                onlineDot.style.backgroundColor = "#06b6d4"; // cyan
-                onlineDot.className = "status-dot glowing";
-                statusText.innerText = "Noor is thinking...";
-                avatarOverlayText.innerText = "Noor (Thinking...)";
-            } else if (state === "speaking") {
-                onlineDot.style.backgroundColor = "#a855f7"; // purple glowing
-                onlineDot.className = "status-dot glowing";
-                statusText.innerText = "Noor is Speaking";
-                avatarOverlayText.innerText = "Noor (Speaking)";
-            }
+            statusState = state;
+            const colors = { idle: "#10b981", thinking: "#06b6d4", speaking: "#a855f7", disconnected: "#ef4444" };
+            onlineDot.style.backgroundColor = colors[state] || "#ef4444";
+            onlineDot.className = (state === "idle") ? "status-dot" : "status-dot glowing";
+            const labels = {
+                idle: "Connected", thinking: "Noor is thinking...",
+                speaking: "Noor is Speaking", disconnected: "Disconnected (Retrying)"
+            };
+            statusText.innerText = labels[state] || state;
+            const overlays = {
+                idle: "Noor (Idle)", thinking: "Noor (Thinking...)",
+                speaking: "Noor (Speaking)", disconnected: "Noor (Offline)"
+            };
+            avatarOverlay.innerText = overlays[state] || state;
         }
 
-        // Add message bubble to chat logs
         function addMessage(sender, text) {
-            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            const messageDiv = document.createElement("div");
-            messageDiv.className = `message ${sender}`;
-
-            messageDiv.innerHTML = `
-                <div class="message-bubble">${text}</div>
-                <span class="message-time">${time}</span>
-            `;
-
-            chatMessages.appendChild(messageDiv);
+            const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            const d = document.createElement("div");
+            d.className = `message ${sender}`;
+            d.innerHTML = `<div class="message-bubble">${text}</div><span class="message-time">${time}</span>`;
+            chatMessages.appendChild(d);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
-        // Connect to WebSocket Server
-        function connectWS() {
-            if (ws) {
-                try { ws.close(); } catch(e) {}
-            }
+        // ── Audio queue ─────────────────────────────────────────────────────────
+        function enqueueAudio(src) {
+            audioQueue.push(src);
+            if (!isAudioPlaying) drainAudioQueue();
+        }
 
-            showHttpsWarningIfNeeded();
-            const wsUrl = getWebSocketUrl();
-            console.log("Connecting to WebSocket:", wsUrl);
+        function drainAudioQueue() {
+            if (audioQueue.length === 0) {
+                isAudioPlaying = false;
+                if (isGenEnded) {
+                    isRTCStreaming = false;
+                    updateStatus("idle");
+                }
+                return;
+            }
+            isAudioPlaying = true;
+            globalAudio.src = audioQueue.shift();
+            globalAudio.onended = drainAudioQueue;
+            globalAudio.play().catch(() => drainAudioQueue());
+        }
+
+        // ── WebRTC connection ───────────────────────────────────────────────────
+        async function connectRTC() {
+            // Close any previous connection cleanly
+            if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+
+            updateStatus("disconnected");
+
+            // Fetch ICE config (includes TURN credentials) from server
+            let iceConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
             try {
-                ws = new WebSocket(wsUrl);
-            } catch(e) {
-                console.error("Failed to construct WebSocket:", e);
+                const r = await fetch(getServerUrl("/ice-config"));
+                iceConfig = await r.json();
+                console.log("[WebRTC] ICE config:", JSON.stringify(iceConfig));
+            } catch (e) {
+                console.warn("[WebRTC] Could not fetch /ice-config, using STUN only:", e);
+            }
+
+            pc = new RTCPeerConnection(iceConfig);
+
+            // Hidden video element — WebRTC video track is rendered here,
+            // then drawn to canvas so the idle loop stays in control of display.
+            rtcVideoEl = document.createElement("video");
+            rtcVideoEl.autoplay    = true;
+            rtcVideoEl.muted       = true;
+            rtcVideoEl.playsInline = true;
+
+            // Server sends video — tell it we only want to receive
+            pc.addTransceiver("video", { direction: "recvonly" });
+
+            pc.ontrack = (e) => {
+                if (e.track.kind === "video") {
+                    rtcVideoEl.srcObject = e.streams[0];
+                    rtcVideoEl.play().catch(() => {});
+                    console.log("[WebRTC] Video track attached.");
+                }
+            };
+
+            // Data channel — client creates it; server receives via on("datachannel")
+            dataChannel = pc.createDataChannel("control");
+            dataChannel.onopen    = () => { console.log("[WebRTC] Data channel open."); updateStatus("idle"); };
+            dataChannel.onclose   = () => {
+                console.warn("[WebRTC] Data channel closed. Reconnecting in 3 s…");
+                updateStatus("disconnected");
+                setTimeout(connectRTC, 3000);
+            };
+            dataChannel.onmessage = handleControlMessage;
+
+            pc.onconnectionstatechange = () => {
+                console.log("[WebRTC] Connection state:", pc.connectionState);
+                if (pc.connectionState === "failed") {
+                    pc.close(); pc = null;
+                    setTimeout(connectRTC, 3000);
+                }
+            };
+
+            pc.onicecandidateerror = (e) => console.warn("[ICE] Candidate error:", e.errorText);
+
+            // Build offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Exchange with server
+            let ans;
+            try {
+                const resp = await fetch(getServerUrl("/offer"), {
+                    method:  "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body:    JSON.stringify({
+                        sdp:        pc.localDescription.sdp,
+                        type:       pc.localDescription.type,
+                        session_id: rtcSessionId || undefined,
+                    }),
+                });
+                ans = await resp.json();
+            } catch (e) {
+                console.error("[WebRTC] /offer request failed:", e);
+                setTimeout(connectRTC, 5000);
                 return;
             }
 
-            ws.onopen = () => {
-                updateStatus("idle");
-                console.log("WebSocket connected successfully.");
-            };
+            rtcSessionId = ans.session_id;
+            await pc.setRemoteDescription(new RTCSessionDescription({ sdp: ans.sdp, type: ans.type }));
+            console.log("[WebRTC] Signaling complete. Session:", rtcSessionId);
+        }
 
-            ws.onclose = () => {
-                onlineDot.style.backgroundColor = "#ef4444"; // red
-                onlineDot.className = "status-dot glowing";
-                statusText.innerText = "Disconnected (Retrying)";
-                avatarOverlayText.innerText = "Noor (Offline)";
-                console.log("WebSocket disconnected. Retrying in 3 seconds...");
-                setTimeout(connectWS, 3000);
-            };
+        // ── Data channel message handler ────────────────────────────────────────
+        function handleControlMessage(event) {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch (_) { return; }
 
-            ws.onerror = (err) => {
-                console.error("WebSocket connection error:", err);
-            };
-
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                
-                // Ignore messages from old sessions if a new request was made
-                if (msg.session_id && msg.session_id !== currentSessionId) {
-                    return;
-                }
-
-                if (msg.type === "chunk_start") {
-                    console.log(`Received chunk_start for index: ${msg.chunk_index}. Total frames: ${msg.total_frames}`);
-                    
-                    if (msg.chunk_index === 0) {
-                        // Keep typingIndicator visible and status as 'thinking'
-                        playbackQueue = [];
-                        globalAudioPlayer.pause();
-                        currentPlayingChunk = null;
-                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
-                    }
-
-                    const chunk = {
-                        index: msg.chunk_index,
-                        text: msg.text,
-                        audioSrc: msg.audio,
-                        frames: new Array(msg.total_frames),
-                        totalFrames: msg.total_frames,
-                        isReady: false,
-                        receivedFrames: 0
-                    };
-                    playbackQueue.push(chunk);
-                    
-                    addMessage("noor", msg.text);
-                    checkQueue();
-
-                } else if (msg.type === "frame") {
-                    // Find target chunk in queue
-                    let targetChunk = currentPlayingChunk && currentPlayingChunk.index === msg.chunk_index 
-                                      ? currentPlayingChunk 
-                                      : playbackQueue.find(c => c.index === msg.chunk_index);
-
-                    if (targetChunk) {
-                        fetch(msg.image)
-                            .then(res => res.blob())
-                            .then(blob => createImageBitmap(blob))
-                            .then(bitmap => {
-                                targetChunk.frames[msg.index] = bitmap;
-                                targetChunk.receivedFrames++;
-                                
-                                // Render first frame immediately to lock pose
-                                if (msg.chunk_index === 0 && msg.index === 0 && currentStatusState === "buffering") {
-                                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                                }
-                                checkQueue();
-                            })
-                            .catch(err => {
-                                console.error("Error decoding frame:", err);
-                            });
-                    }
-
-                } else if (msg.type === "chunk_end") {
-                    let targetChunk = currentPlayingChunk && currentPlayingChunk.index === msg.chunk_index 
-                                      ? currentPlayingChunk 
-                                      : playbackQueue.find(c => c.index === msg.chunk_index);
-                    if (targetChunk) {
-                        targetChunk.isReady = true;
-                        console.log(`Chunk ${msg.chunk_index} fully ready.`);
-                        checkQueue();
-                    }
-
-                } else if (msg.type === "end") {
-                    console.log("All chunks sent from server.");
-                } else if (msg.type === "error") {
-                    console.error("Server error:", msg.message);
-                    addMessage("system", "Error: " + msg.message);
+            if (msg.type === "chunk_start") {
+                if (msg.chunk_index === 0) {
+                    // New generation starting — reset playback state
+                    audioQueue     = [];
+                    isAudioPlaying = false;
+                    isGenEnded     = false;
+                    globalAudio.pause();
                     typingIndicator.style.display = "none";
+                    isRTCStreaming = true;
+                    updateStatus("speaking");
+                }
+                addMessage("noor", msg.text);
+                enqueueAudio(msg.audio);
+
+            } else if (msg.type === "end") {
+                isGenEnded = true;
+                // If audio already finished draining, go idle now
+                if (!isAudioPlaying && audioQueue.length === 0) {
+                    isRTCStreaming = false;
                     updateStatus("idle");
                 }
-            };
-        }
 
-        function checkQueue() {
-            if (currentPlayingChunk !== null) return; // Currently playing a chunk
-
-            if (playbackQueue.length > 0) {
-                const nextChunk = playbackQueue[0];
-                
-                // Start playing if the chunk is ready, or we have accumulated 10 frames (~0.4s buffer)
-                if (nextChunk.isReady || nextChunk.receivedFrames >= 10) {
-                    currentPlayingChunk = playbackQueue.shift(); // Remove from queue
-                    
-                    // Hide the typing indicator as soon as the first chunk starts playing
-                    if (nextChunk.index === 0) {
-                        typingIndicator.style.display = "none";
-                    }
-                    
-                    playChunk(currentPlayingChunk);
-                }
+            } else if (msg.type === "error") {
+                console.error("[Server]", msg.message);
+                typingIndicator.style.display = "none";
+                isRTCStreaming = false;
+                updateStatus("idle");
+                addMessage("noor", "Error: " + msg.message);
             }
         }
 
-        function playChunk(chunk) {
-            updateStatus("speaking");
-            
-            globalAudioPlayer.src = chunk.audioSrc;
-            
-            globalAudioPlayer.onended = () => {
-                currentPlayingChunk = null;
-                if (animationFrameId) cancelAnimationFrame(animationFrameId);
-                
-                // If there are more chunks, checkQueue will start them
-                if (playbackQueue.length > 0) {
-                    checkQueue();
-                } else {
-                    updateStatus("idle");
+        // ── Canvas render loop ──────────────────────────────────────────────────
+        // When streaming: pull from the hidden WebRTC video element at display rate.
+        // When idle: idle loop draws from pre-loaded static frames.
+        function startRenderLoop() {
+            function draw() {
+                if (isRTCStreaming && rtcVideoEl && rtcVideoEl.readyState >= 2 && rtcVideoEl.videoWidth > 0) {
+                    const vw = rtcVideoEl.videoWidth, vh = rtcVideoEl.videoHeight;
+                    if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+                    ctx.drawImage(rtcVideoEl, 0, 0, vw, vh);
                 }
-            };
-
-            globalAudioPlayer.play().then(() => {
-                renderChunkLoop(chunk);
-            }).catch(err => {
-                console.error("Audio play error:", err);
-                currentPlayingChunk = null;
-                checkQueue(); // Try next chunk if this one fails
-            });
+                requestAnimationFrame(draw);
+            }
+            requestAnimationFrame(draw);
         }
 
-        function renderChunkLoop(chunk) {
-            if (chunk !== currentPlayingChunk || globalAudioPlayer.ended) {
-                return;
-            }
-
-            const currentTime = globalAudioPlayer.currentTime;
-            const frameIndex = Math.floor(currentTime * 25);
-
-            if (frameIndex < chunk.totalFrames) {
-                const hasFrame = !!chunk.frames[frameIndex];
-                
-                if (chunk.isBuffering) {
-                    // Only resume if we have a healthy cushion (10 frames) or the chunk is complete
-                    const bufferCushion = chunk.receivedFrames - frameIndex;
-                    const isHealthy = bufferCushion >= 10 || chunk.isReady;
-                    
-                    if (hasFrame && isHealthy) {
-                        chunk.isBuffering = false;
-                        updateStatus("speaking");
-                        globalAudioPlayer.play().catch(e => {});
-                    }
-                }
-
-                if (hasFrame && !chunk.isBuffering) {
-                    const img = chunk.frames[frameIndex];
-                    if (img) {
-                        const w = img.naturalWidth || img.width;
-                        const h = img.naturalHeight || img.height;
-                        if (canvas.width !== w || canvas.height !== h) {
-                            canvas.width = w;
-                            canvas.height = h;
-                        }
-                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                    }
-                } else {
-                    // Frame is NOT available or we are still buffering! Pause and wait for cushion
-                    if (!chunk.isBuffering) {
-                        chunk.isBuffering = true;
-                        updateStatus("idle"); // Show breathing animation seamlessly
-                        globalAudioPlayer.pause();
-                    }
-                }
-            }
-
-            animationFrameId = requestAnimationFrame(() => renderChunkLoop(chunk));
-        }
-
-        // Generate smooth breathing idle loop from cached frames
+        // ── Idle breathing loop ─────────────────────────────────────────────────
         function startIdleLoop() {
             if (idleInterval) clearInterval(idleInterval);
             idleInterval = setInterval(() => {
-                if (currentStatusState === "speaking") return;
-                if (idleFrames.length > 0) {
-                    const img = idleFrames[idleFrameIdx % idleFrames.length];
-                    if (img && img.complete && img.naturalWidth !== 0) {
+                if (isRTCStreaming || idleFrames.length === 0) return;
+                const img = idleFrames[idleFrameIdx % idleFrames.length];
+                if (img && img.complete && img.naturalWidth > 0) {
+                    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+                        canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+                    }
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                }
+                idleFrameIdx++;
+            }, 40); // 25 fps
+        }
+
+        function loadIdleFrames() {
+            idleFrames = [];
+            const START = 125, END = 175;
+            for (let i = START; i < END; i++) {
+                const img = new Image();
+                img.src = getServerUrl(`/full_imgs/${String(i).padStart(8, "0")}.png`);
+                if (i === START) img.onload = () => {
+                    if (!isRTCStreaming) {
                         if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-                            canvas.width = img.naturalWidth;
-                            canvas.height = img.naturalHeight;
+                            canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
                         }
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     }
-                    idleFrameIdx++;
-                }
-            }, 40); // 25 FPS for a perfectly smooth idle loop
-        }
-
-        // Preload frames from 5th second (125) to 15th second (375)
-        function loadIdleFrames() {
-            idleFrames = [];
-            const START_FRAME = 125; // 5th second (5 * 25 FPS)
-            const END_FRAME = 175;   // 7th second (only 50 frames to reduce startup load)
-            for (let i = START_FRAME; i < END_FRAME; i++) {
-                const img = new Image();
-                const frameNum = String(i).padStart(8, '0');
-                img.src = getServerUrl(`/full_imgs/${frameNum}.png`);
-                
-                // Draw the very first frame immediately once it loads so the screen isn't blank
-                if (i === START_FRAME) {
-                    img.onload = () => {
-                        if (currentStatusState === "idle") {
-                            if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-                                canvas.width = img.naturalWidth;
-                                canvas.height = img.naturalHeight;
-                            }
-                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                        }
-                    };
-                }
+                };
                 idleFrames.push(img);
             }
         }
 
-        // Reinitialize everything when server URL changes
+        // ── Reinitialize on server URL change ───────────────────────────────────
         function reinitialize() {
-            console.log("Server URL changed. Re-initializing WebSocket and cache...");
-            showHttpsWarningIfNeeded();
             loadIdleFrames();
-            connectWS();
+            connectRTC();
         }
 
-        // Send Custom Input Chat
-        function sendCustomChat(event) {
+        // ── Send message ────────────────────────────────────────────────────────
+        async function sendCustomChat(event) {
             event.preventDefault();
             const text = messageInput.value.trim();
             if (!text) return;
 
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                currentSessionId = Date.now().toString();
-                
-                // Cancel current playback completely
-                globalAudioPlayer.pause();
-                currentPlayingChunk = null;
-                playbackQueue = [];
-                if (animationFrameId) cancelAnimationFrame(animationFrameId);
-                
-                // Unlock audio on user interaction by playing silence
-                globalAudioPlayer.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA";
-                globalAudioPlayer.play().catch(e => {});
-                
-                addMessage("user", text);
-                messageInput.value = "";
-                typingIndicator.style.display = "flex";
-                updateStatus("thinking");
-                ws.send(JSON.stringify({ text: text, session_id: currentSessionId }));
-            } else {
-                addMessage("noor", "Error: Server connection offline. Cannot send message.");
+            if (!pc || pc.connectionState !== "connected") {
+                addMessage("noor", "Not connected yet — please wait a moment and try again.");
+                return;
+            }
+
+            // Unlock audio context on first user gesture
+            globalAudio.src = SILENCE_SRC;
+            globalAudio.play().catch(() => {});
+
+            addMessage("user", text);
+            messageInput.value = "";
+            typingIndicator.style.display = "flex";
+            updateStatus("thinking");
+
+            try {
+                const resp = await fetch(getServerUrl("/generate"), {
+                    method:  "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body:    JSON.stringify({ text, session_id: rtcSessionId }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+                    throw new Error(err.detail || "Server error");
+                }
+            } catch (e) {
+                console.error("[Generate]", e);
+                typingIndicator.style.display = "none";
+                updateStatus("idle");
+                addMessage("noor", "Error: " + e.message);
             }
         }
 
-        // Load and Connect
+        // ── Boot ────────────────────────────────────────────────────────────────
         loadIdleFrames();
-        connectWS();
         startIdleLoop();
+        startRenderLoop();
+        connectRTC();
     </script>
 </body>
 </html>
